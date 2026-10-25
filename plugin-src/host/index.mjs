@@ -27,6 +27,7 @@ import { installInjectedContext } from './injected-context.mjs';
 import { installSessionSyncCoordinator } from './session-sync-coordinator.mjs';
 import { installSessionTitlePrefix } from './session-title-prefix.mjs';
 import { installUpdateRpc } from './update-rpc.mjs';
+import { installPushMediaTool } from './push-media-tool.mjs';
 
 export const name = 'dsh-im-host';
 export const inject = [
@@ -157,10 +158,12 @@ export function createImHostPlugin(internals = {}) {
       ctx.inject(['tools', 'systemPrompt'], (artifactCtx) => {
         installOutboundArtifactTool(artifactCtx);
         installGroupHistoryTools(artifactCtx);
+        installPushMediaTool(artifactCtx, deliveryService);
       });
     } else {
       installOutboundArtifactTool(ctx);
       installGroupHistoryTools(ctx);
+      installPushMediaTool(ctx, deliveryService);
     }
     const logger = typeof ctx?.logger === 'function'
       ? ctx.logger(name)
