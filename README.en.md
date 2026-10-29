@@ -259,6 +259,40 @@ See the [Proactive Delivery Guide](PROACTIVE_DELIVERY.en.md) ([简体中文](PRO
 
 DSH versions supporting global panels show **IM bots** in the left sidebar, using a thin monochrome outline of the catalog's linked speech bubbles to open the full management panel. Settings → IM bots and the plugin detail page's Open IM bots action remain available. Shells can also embed the panel through the optional `dshImClient` service. See the [client integration guide](docs/client-integration.md) for the contract, compatibility requirements and lifecycle example.
 
+### Session → conversation lookup (host service)
+
+Other plugins may receive only a Session id while needing to know which channel, bot, chat, or topic owns it. The host service `dshIm` exposes a read-only lookup for that purpose:
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null — the Session is not owned by an IM conversation
+// otherwise:
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- Read-only: no network access, session creation, blocking reply, or thrown error; unknown Sessions return `null`.
+- Data comes from the plugin's state files (`sessions`) and bot configuration; no new core fields are required.
+- `chatType` is `group`, `thread`, or `dm`; a `direct:dm:<id>` key supplies `<id>` as `senderId`.
+- The first lookup logs one line per Session; later lookups do not repeat it.
+- The bridge remembers the last inbound author's id, name, username, and bot flag in the bot state, without storing message text.
+
+### The two binding events
+
+A binding change is announced synchronously, so a subscriber keeps its own session → identity table without asking back:
+
+| Event | Emitted when | Payload |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | a conversation is bound to a session, before `session.create` | `channel`, `botId`, `sessionId`, `conversationKey`, `chatType`, `chatId`, `threadId`, `senderId`, `senderName` |
+| `dsh-im/session-unbind` | the conversation no longer points at its session: it moved to another one, or the binding was cleared | the same fields without the author; `sessionId` is the old session that was detached |
+
+- Both are synchronous, and the order is detach-then-bind, so a subscriber reads one straight line.
+- Only committed writes announce anything: a refused write (`false`) or a rewrite of the same session emits no `unbind`.
+- Clearing one binding (`clearSession`) or every binding (`clearSessions`) emits a `session-unbind` per conversation.
+- A throwing subscriber never breaks message handling.
+- A detach does not erase the session's identity: keeping the row (with a `superseded_at`, for instance) still lets a scheduled task that owns that session deliver into the original chat — only "who owns this conversation" has to be answered from the latest bind.
+
 ### Context enhancement
 
 [Read the context enhancement guide](docs/context-enhancement.md)
