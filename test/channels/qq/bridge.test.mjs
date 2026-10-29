@@ -1363,9 +1363,42 @@ test('QQ announces a stopped turn and closes its unused private stream', async (
 
   await bridge.accept(message({ messageId: 'qq-stopped-stream' }));
 
-  assert.deepEqual(sent, ['已停止。']);
+  assert.deepEqual(sent, ['🔧 正在执行：bash', '已停止。']);
   assert.equal(loggedErrors, 0);
   assert.equal(fixture.seen.has('qq-stopped-stream'), true);
+});
+
+test('QQ paces private tool progress to one notice per interval', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-progress-pace']]);
+  const sent = [];
+  const markdown = [];
+  const bridge = new QqHarnessBridge({
+    bot: {
+      sendText: async (_target, text) => sent.push(text),
+      send: async (options) => {
+        markdown.push(options);
+        return { message: { id: 'qq-progress-markdown' } };
+      },
+    },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_session, _text, { onUpdate }) => {
+        // 第一个工具立即通知，节流窗口内的后续工具被吞掉，最终答案照常投递。
+        await onUpdate({ type: 'tool', name: 'bash' });
+        await onUpdate({ type: 'tool', name: 'read' });
+        await onUpdate({ type: 'tool', name: 'grep' });
+        return '已完成';
+      },
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'qq-progress-pace' }));
+
+  assert.deepEqual(sent, ['🔧 正在执行：bash']);
+  assert.equal(markdown.length, 1);
+  assert.equal(markdown[0].markdown.content, '已完成');
 });
 
 test('QQ keeps a stopped turn terminal when its notice cannot be sent', async () => {

@@ -85,6 +85,13 @@ function interactionResolvedText() {
 }
 const DEFAULT_FILE_UPLOAD_TIMEOUT_MS = 120_000;
 
+/**
+ * Minimum gap between tool-progress notices on one conversation. The turn's own
+ * updates arrive faster than a person can read them, and QQ rate-limits active
+ * sends, so the trace is paced instead of forwarded verbatim.
+ */
+const QQ_TOOL_PROGRESS_MIN_INTERVAL_MS = 10_000;
+
 export const QQ_IMAGE_HOSTS = Object.freeze([
   '.myqcloud.com',
   '.qpic.cn',
@@ -470,6 +477,8 @@ export class QqHarnessBridge {
   #batchInputs = new BatchInputManager();
   #menus = new QqMenuStore();
   #menuTasks = new Map();
+  // Last tool-progress notice per conversation key; see #pushToolProgress.
+  #toolProgressSentAt = new Map();
 
   constructor({
     bot,
@@ -1108,6 +1117,29 @@ export class QqHarnessBridge {
     return task;
   }
 
+  /**
+   * Announce a tool call on the chat while the turn is still running.
+   *
+   * Paced per conversation: the first call of a turn goes out immediately, the
+   * rest at most one per QQ_TOOL_PROGRESS_MIN_INTERVAL_MS. A failed notice is
+   * logged and dropped — the turn's final answer still carries the result, so
+   * progress must never be able to fail it.
+   */
+  async #pushToolProgress(target, key, name) {
+    const now = Date.now();
+    const last = this.#toolProgressSentAt.get(key) ?? 0;
+    if (now - last < QQ_TOOL_PROGRESS_MIN_INTERVAL_MS) return;
+    this.#toolProgressSentAt.set(key, now);
+    const label = (nonEmptyString(name) ?? t('工具'))
+      .replace(/[\r\n]+/gu, ' ')
+      .slice(0, 80);
+    try {
+      await this.#bot.sendText(target, t('🔧 正在执行：{name}', { name: label }));
+    } catch (error) {
+      this.#logger.warn?.('[dsh-im:qq] tool progress notice failed:', error);
+    }
+  }
+
   async #deliverArtifacts(target, replyTo, artifacts = [], baseReceipt = null) {
     if (artifacts.length === 0) {
       return { receipt: baseReceipt, failureNoticeVisible: false, artifactSendErrors: 0 };
@@ -1300,6 +1332,13 @@ export class QqHarnessBridge {
                   '工具调用「{name}」未成功，请检查工具配置或稍后重试。',
                   { name },
                 ));
+              }
+              // A long turn would otherwise stay silent until its final answer.
+              // The tool events are already subscribed below; only their
+              // delivery to the chat was missing. Group chats keep their
+              // deliberate silence: a room is read by everyone.
+              if (update.type === 'tool' && message.kind !== 'group') {
+                void this.#pushToolProgress(target, key, update.name);
               }
             },
             onInteraction: (interaction) => this.#handleInteraction(interaction, {

@@ -94,4 +94,5 @@ export default {
   'QQ 连接当前离线': 'The QQ connection is currently offline',
   'QQ 已授权，但无法安全保存接入配置。':
     'QQ authorization succeeded, but the connection configuration could not be saved safely.',
+  '🔧 正在执行：{name}': '🔧 Running: {name}',
 };
