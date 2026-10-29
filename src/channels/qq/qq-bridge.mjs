@@ -92,6 +92,13 @@ const DEFAULT_FILE_UPLOAD_TIMEOUT_MS = 120_000;
  */
 const QQ_TOOL_PROGRESS_MIN_INTERVAL_MS = 10_000;
 
+/**
+ * Longest progress line pushed mid-turn. The final answer arrives separately as
+ * Markdown, so a progress line only has to say what is happening — a whole
+ * step's prose is noise on a phone.
+ */
+const QQ_PROGRESS_TEXT_MAX_CHARS = 200;
+
 export const QQ_IMAGE_HOSTS = Object.freeze([
   '.myqcloud.com',
   '.qpic.cn',
@@ -477,7 +484,7 @@ export class QqHarnessBridge {
   #batchInputs = new BatchInputManager();
   #menus = new QqMenuStore();
   #menuTasks = new Map();
-  // Last tool-progress notice per conversation key; see #pushToolProgress.
+  // Last progress notice per conversation key; see #pushProgress.
   #toolProgressSentAt = new Map();
 
   constructor({
@@ -1118,25 +1125,26 @@ export class QqHarnessBridge {
   }
 
   /**
-   * Announce a tool call on the chat while the turn is still running.
+   * Push one progress line to the chat while the turn is still running.
    *
-   * Paced per conversation: the first call of a turn goes out immediately, the
-   * rest at most one per QQ_TOOL_PROGRESS_MIN_INTERVAL_MS. A failed notice is
-   * logged and dropped — the turn's final answer still carries the result, so
-   * progress must never be able to fail it.
+   * Both sources share this path: a tool call (rendered as a short notice) and
+   * the model's own per-step text. Pacing is per conversation — the first line
+   * of a turn goes out immediately, the rest at most one per
+   * QQ_TOOL_PROGRESS_MIN_INTERVAL_MS — so a chat that speaks fast cannot flood
+   * the room. A failed notice is logged and dropped: the turn's final answer
+   * still carries the result, so progress must never be able to fail it.
    */
-  async #pushToolProgress(target, key, name) {
+  async #pushProgress(target, key, text) {
     const now = Date.now();
     const last = this.#toolProgressSentAt.get(key) ?? 0;
     if (now - last < QQ_TOOL_PROGRESS_MIN_INTERVAL_MS) return;
     this.#toolProgressSentAt.set(key, now);
-    const label = (nonEmptyString(name) ?? t('工具'))
-      .replace(/[\r\n]+/gu, ' ')
-      .slice(0, 80);
+    const line = text.replace(/[\r\n]+/gu, ' ').trim().slice(0, QQ_PROGRESS_TEXT_MAX_CHARS);
+    if (!line) return;
     try {
-      await this.#bot.sendText(target, t('🔧 正在执行：{name}', { name: label }));
+      await this.#bot.sendText(target, line);
     } catch (error) {
-      this.#logger.warn?.('[dsh-im:qq] tool progress notice failed:', error);
+      this.#logger.warn?.('[dsh-im:qq] progress notice failed:', error);
     }
   }
 
@@ -1338,7 +1346,13 @@ export class QqHarnessBridge {
               // delivery to the chat was missing. Group chats keep their
               // deliberate silence: a room is read by everyone.
               if (update.type === 'tool' && message.kind !== 'group') {
-                void this.#pushToolProgress(target, key, update.name);
+                const label = nonEmptyString(update.name) ?? t('工具');
+                void this.#pushProgress(target, key, t('🔧 正在执行：{name}', { name: label }));
+              }
+              // The model's own per-step text is the progress worth reading: it
+              // says what is being done and why, not just which tool ran.
+              if (update.type === 'assistant-message' && message.kind !== 'group') {
+                void this.#pushProgress(target, key, nonEmptyString(update.text) ?? '');
               }
             },
             onInteraction: (interaction) => this.#handleInteraction(interaction, {
