@@ -63,6 +63,10 @@ function normalizeState(value) {
     version: 1,
     sessions,
     includeArchivedSessions: value.includeArchivedSessions === true,
+    // Off by default: the model's own per-step text is the progress worth
+    // reading, and a tool-name notice only adds noise next to it. The /progress
+    // command turns it back on for a chat that wants the machine view.
+    toolProgressNotices: value.toolProgressNotices === true,
     ...(pendingMessages.length ? { pendingMessages } : {}),
     ...(value.deferred ? { deferred: normalizeDeferredState(value.deferred) } : {}),
     seenMessageIds: Array.isArray(value.seenMessageIds)
@@ -170,6 +174,13 @@ export class QqStateStore {
 
   async setIncludeArchivedSessions(include) {
     this.#state.includeArchivedSessions = include === true;
+    await this.#persist();
+  }
+
+  includesToolProgressNotices() { return this.#state.toolProgressNotices === true; }
+
+  async setToolProgressNotices(include) {
+    this.#state.toolProgressNotices = include === true;
     await this.#persist();
   }
 

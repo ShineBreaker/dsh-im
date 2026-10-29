@@ -45,6 +45,7 @@ async function eventually(predicate, messageText = 'condition was not met') {
 function stateFixture(initialSessions = []) {
   const sessions = new Map(initialSessions);
   const seen = new Set();
+  let toolProgressNotices = false;
   return {
     sessions,
     seen,
@@ -54,6 +55,8 @@ function stateFixture(initialSessions = []) {
       sessionFor: (key) => sessions.get(key) ?? null,
       setSession: async (key, sessionId) => sessions.set(key, sessionId),
       clearSession: async (key) => sessions.delete(key),
+      includesToolProgressNotices: () => toolProgressNotices,
+      setToolProgressNotices: async (include) => { toolProgressNotices = include === true; },
     },
   };
 }
@@ -1363,12 +1366,13 @@ test('QQ announces a stopped turn and closes its unused private stream', async (
 
   await bridge.accept(message({ messageId: 'qq-stopped-stream' }));
 
-  assert.deepEqual(sent, ['🔧 正在执行：bash', '已停止。']);
+  // 工具通知默认关闭，只保留停止播报。
+  assert.deepEqual(sent, ['已停止。']);
   assert.equal(loggedErrors, 0);
   assert.equal(fixture.seen.has('qq-stopped-stream'), true);
 });
 
-test('QQ paces private tool progress to one notice per interval', async () => {
+test('QQ paces private tool progress to one notice per interval once enabled', async () => {
   const fixture = stateFixture([['c2c:owner-openid', 'session-progress-pace']]);
   const sent = [];
   const markdown = [];
@@ -1394,11 +1398,40 @@ test('QQ paces private tool progress to one notice per interval', async () => {
     state: fixture.state,
   });
 
+  await bridge.accept(message({ messageId: 'qq-progress-on' }));
+  // 默认关闭：工具事件不产生任何推送。
+  assert.deepEqual(sent, []);
+  assert.equal(markdown.length, 1);
+
+  await fixture.state.setToolProgressNotices(true);
   await bridge.accept(message({ messageId: 'qq-progress-pace' }));
 
   assert.deepEqual(sent, ['🔧 正在执行：bash']);
-  assert.equal(markdown.length, 1);
-  assert.equal(markdown[0].markdown.content, '已完成');
+  assert.equal(markdown.length, 2);
+});
+
+test('QQ /progress reports and toggles the tool notice state', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-progress-command']]);
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: { sessionExists: async () => true, ask: async () => '答案' },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'qq-progress-query', content: '/progress' }));
+  await bridge.accept(message({ messageId: 'qq-progress-turn-on', content: '/progress on' }));
+  await bridge.accept(message({ messageId: 'qq-progress-turn-off', content: '/progress OFF' }));
+  await bridge.accept(message({ messageId: 'qq-progress-bogus', content: '/progress maybe' }));
+
+  assert.equal(fixture.state.includesToolProgressNotices(), false);
+  assert.equal(sent.length, 4);
+  assert.match(sent[0], /当前已关闭/);
+  assert.match(sent[1], /已开启/);
+  // 命令大小写不敏感；第三条把开关重新关上，所以末条回到「已关闭」。
+  assert.match(sent[2], /已关闭/);
+  assert.match(sent[3], /当前已关闭/);
 });
 
 test('QQ pushes the model per-step text as private progress', async () => {
@@ -1433,7 +1466,7 @@ test('QQ pushes the model per-step text as private progress', async () => {
   assert.equal(markdown[0].markdown.content, '最终答案');
 });
 
-test('QQ truncates a per-step progress line', async () => {
+test('QQ passes a normal-length per-step line through and only trims a runaway one', async () => {
   const fixture = stateFixture([['c2c:owner-openid', 'session-progress-truncate']]);
   const sent = [];
   const bridge = new QqHarnessBridge({
@@ -1445,17 +1478,43 @@ test('QQ truncates a per-step progress line', async () => {
     harness: {
       sessionExists: async () => true,
       ask: async (_session, _text, { onUpdate }) => {
-        await onUpdate({ type: 'assistant-message', step: 0, text: 'x'.repeat(500) });
+        await onUpdate({ type: 'assistant-message', step: 0, text: 'y'.repeat(600) });
         return '答案';
       },
     },
     state: fixture.state,
   });
 
-  await bridge.accept(message({ messageId: 'qq-progress-truncate' }));
+  await bridge.accept(message({ messageId: 'qq-progress-normal' }));
+
+  // 正常一步的篇幅原样通过，不做内容裁剪。
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].length, 600);
+});
+
+test('QQ trims a per-step line only past the runaway ceiling', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-progress-runaway']]);
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: {
+      sendText: async (_target, text) => sent.push(text),
+      send: async () => ({ message: { id: 'qq-runaway-markdown' } }),
+    },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_session, _text, { onUpdate }) => {
+        await onUpdate({ type: 'assistant-message', step: 0, text: 'x'.repeat(5000) });
+        return '答案';
+      },
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'qq-progress-runaway' }));
 
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].length, 200);
+  assert.equal(sent[0].length, 1000);
 });
 
 test('QQ keeps group chats silent for per-step text progress', async () => {

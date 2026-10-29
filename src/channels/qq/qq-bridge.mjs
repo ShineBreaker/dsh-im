@@ -86,18 +86,19 @@ function interactionResolvedText() {
 const DEFAULT_FILE_UPLOAD_TIMEOUT_MS = 120_000;
 
 /**
- * Minimum gap between tool-progress notices on one conversation. The turn's own
+ * Minimum gap between progress notices on one conversation. The turn's own
  * updates arrive faster than a person can read them, and QQ rate-limits active
  * sends, so the trace is paced instead of forwarded verbatim.
  */
 const QQ_TOOL_PROGRESS_MIN_INTERVAL_MS = 10_000;
 
 /**
- * Longest progress line pushed mid-turn. The final answer arrives separately as
- * Markdown, so a progress line only has to say what is happening — a whole
- * step's prose is noise on a phone.
+ * Ceiling for one progress line, kept only so a pathologically long step cannot
+ * produce a message the platform rejects outright. It is not a content trim: a
+ * normal step's prose sits far below it, and the final answer arrives separately
+ * as Markdown.
  */
-const QQ_PROGRESS_TEXT_MAX_CHARS = 200;
+const QQ_PROGRESS_TEXT_MAX_CHARS = 1000;
 
 export const QQ_IMAGE_HOSTS = Object.freeze([
   '.myqcloud.com',
@@ -124,6 +125,7 @@ function helpText() {
     t('直接发送文字、图片或文件即可继续当前会话。'),
     t('/menu 或 /m  打开可点击的功能菜单'),
     t('/new  开启一个全新会话'),
+    t('/progress on 或 /progress off  开关执行工具时的额外通知'),
     t('/compact  压缩当前会话的较早上下文'),
     t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
     t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
@@ -1148,6 +1150,28 @@ export class QqHarnessBridge {
     }
   }
 
+  /**
+   * /progress [on|off] — toggle the mid-turn tool-name notices.
+   *
+   * The model's own per-step text is always pushed; this switch only governs the
+   * extra 「🔧 正在执行：X」 line, which is off by default because the text
+   * already says what is happening. State is per bot and survives restarts.
+   */
+  async #runProgressCommand(command) {
+    const argument = command.split(/\s+/u)[1];
+    if (argument === 'on') {
+      await this.#state.setToolProgressNotices(true);
+      return t('工具执行通知已开启，我会在执行每个工具时额外发一条消息。');
+    }
+    if (argument === 'off') {
+      await this.#state.setToolProgressNotices(false);
+      return t('工具执行通知已关闭，我仍会在每一步说明正在做什么。');
+    }
+    return this.#state.includesToolProgressNotices()
+      ? `${t('工具执行通知当前已开启。')}\n${t('用法：/progress on 或 /progress off')}`
+      : `${t('工具执行通知当前已关闭。')}\n${t('用法：/progress on 或 /progress off')}`;
+  }
+
   async #deliverArtifacts(target, replyTo, artifacts = [], baseReceipt = null) {
     if (artifacts.length === 0) {
       return { receipt: baseReceipt, failureNoticeVisible: false, artifactSendErrors: 0 };
@@ -1242,6 +1266,12 @@ export class QqHarnessBridge {
       if (!hasImages && !hasFiles && command === '/new') {
         await this.#state.clearSession(key);
         await this.#bot.sendText(target, t('已开启新会话。请发送你的问题。'));
+        await markMessageSeen();
+        return;
+      }
+      if (!hasImages && !hasFiles && /^\/progress(?:\s|$)/.test(command)) {
+        const reply = await this.#runProgressCommand(command);
+        await this.#bot.sendText(target, reply);
         await markMessageSeen();
         return;
       }
@@ -1344,8 +1374,11 @@ export class QqHarnessBridge {
               // A long turn would otherwise stay silent until its final answer.
               // The tool events are already subscribed below; only their
               // delivery to the chat was missing. Group chats keep their
-              // deliberate silence: a room is read by everyone.
-              if (update.type === 'tool' && message.kind !== 'group') {
+              // deliberate silence: a room is read by everyone. Tool-name
+              // notices are opt-in (/progress on) because the model's own text
+              // below already says what is happening.
+              if (update.type === 'tool' && message.kind !== 'group'
+                && this.#state.includesToolProgressNotices()) {
                 const label = nonEmptyString(update.name) ?? t('工具');
                 void this.#pushProgress(target, key, t('🔧 正在执行：{name}', { name: label }));
               }
