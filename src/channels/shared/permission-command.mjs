@@ -34,7 +34,7 @@ function permissions(value) {
   };
 }
 
-function description(item) {
+export function description(item) {
   // Translate known Host copy, not an assumed ID -> policy mapping: presets are configurable.
   const text = display(item.description);
   if (text === 'Full file access without approval prompts.') {

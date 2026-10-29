@@ -93,12 +93,12 @@ async function fixture(t, { rejection, policy, group = false } = {}) {
   return { dir, other, route, state, calls, sent, harness, bridge, bot, send, message, pick, latestMenu, sessions };
 }
 
-test('QQ main menu contains the agreed fourteen actions without watches or reasoning selection', async (t) => {
+test('QQ main menu contains the agreed fifteen actions without watches or reasoning selection', async (t) => {
   const f = await fixture(t);
   await f.send('/m');
   const menu = f.latestMenu();
   const buttons = menu.keyboard.content.rows.flatMap((r) => r.buttons);
-  assert.equal(buttons.length, 14);
+  assert.equal(buttons.length, 15);
   assert.ok(menu.keyboard.content.rows.length <= 5);
   assert.ok(menu.keyboard.content.rows.every((r) => r.buttons.length <= 5));
   assert.doesNotMatch(menu.text, /关注|推理等级/);
@@ -128,12 +128,12 @@ test('QQ main menu tool-notice button flips with the persisted switch', async (t
   assert.deepEqual(await labels(), ['🔔 开启工具通知']);
 
   // 点按钮等于发 /progress on。
-  await f.pick(12);
+  await f.pick(13);
   assert.equal(f.state.includesToolProgressNotices(), true);
   assert.deepEqual(await labels(), ['🔕 关闭工具通知']);
   assert.match(f.latestMenu().text, /工具通知：开启/);
 
-  await f.pick(12);
+  await f.pick(13);
   assert.equal(f.state.includesToolProgressNotices(), false);
   assert.deepEqual(await labels(), ['🔔 开启工具通知']);
 
@@ -184,9 +184,9 @@ test('QQ workspace, new session, compact, stop, quick steer and custom steer wor
   await f.pick(2);
   assert.equal(f.harness.currentWorkspace(), f.other);
   await f.state.setSession(key, 'test-session');
-  await f.send('/m'); await f.pick(8);
+  await f.send('/m'); await f.pick(9);
   assert.deepEqual(f.calls.find(([op]) => op === 'compact'), ['compact', 'test-session', '/compact']);
-  await f.send('/m'); await f.pick(7);
+  await f.send('/m'); await f.pick(8);
   assert.deepEqual(f.calls.find(([op]) => op === 'stop'), ['stop', key]);
   await f.send('/m steer'); await f.pick(3);
   assert.deepEqual(f.calls.find(([op]) => op === 'steer'), ['steer', '总结当前进展', key]);
@@ -200,7 +200,7 @@ test('QQ workspace, new session, compact, stop, quick steer and custom steer wor
 
 test('QQ archive visibility survives reload and never archives a session', async (t) => {
   const f = await fixture(t);
-  await f.send('/m'); await f.pick(11);
+  await f.send('/m'); await f.pick(12);
   assert.equal(f.state.includesArchivedSessions(), true);
   const restored = await new QqStateStore(join(f.dir, 'state.json')).load();
   assert.equal(restored.includesArchivedSessions(), true);
@@ -208,7 +208,7 @@ test('QQ archive visibility survives reload and never archives a session', async
   await f.send('/m sessions'); await f.pick(7);
   assert.match(f.latestMenu().text, /已归档/);
   assert.equal(f.calls.length, 0);
-  await f.send('/m'); await f.pick(11);
+  await f.send('/m'); await f.pick(12);
   assert.equal(f.state.includesArchivedSessions(), false);
 });
 
@@ -307,7 +307,7 @@ test('QQ menus do not consume pending answers; stop remains immediate during a r
   const running = deferred();
   f.harness.ask = async () => { await running.promise; return '结束'; };
   const active = f.send('运行测试');
-  await f.send('/m'); await f.pick(7);
+  await f.send('/m'); await f.pick(8);
   assert.ok(f.calls.some(([op]) => op === 'stop'));
   running.resolve(); await active;
 });
@@ -358,6 +358,55 @@ test('QQ queued menu actions recheck running work before changing the session', 
   await prompt;
 });
 
+test('QQ permission page lists presets, marks the current one and switches by full ID', async (t) => {
+  const f = await fixture(t);
+  await f.state.setSession(f.route, 'session-perm');
+  const permissions = async () => ({
+    currentValue: 'workspace-write',
+    options: [
+      { value: 'read-only', name: 'Read only', description: 'No writes at all.' },
+      { value: 'workspace-write', name: 'Workspace write', description: '' },
+      { value: 'danger-full-access', name: 'Full access', description: 'Full file access without approval prompts.' },
+    ],
+  });
+  const original = f.harness.workspaceSession;
+  f.harness.workspaceSession = (id) => ({ ...original(id), permissions });
+  f.harness.executeCommand = async (id, cmd) => { f.calls.push(['perm', id, cmd]); return { result: { kind: 'success' } }; };
+
+  await f.send('/m permissions');
+  const menu = f.latestMenu();
+  assert.match(menu.text, /权限档位/);
+  assert.match(menu.text, /当前权限：workspace-write/);
+  const buttons = menu.keyboard.content.rows.flatMap((r) => r.buttons);
+  assert.equal(buttons.length, 4); // 三档 + 返回
+  assert.match(buttons[1].render_data.label, /✓/);
+  assert.match(buttons[2].render_data.label, /Full access/);
+  // 描述与 /permissionlist 共用同一套汉化。
+  assert.match(buttons[2].render_data.label, /完全文件访问/);
+
+  // 按钮发完整 ID：不依赖 /permissionlist 的快照。
+  await f.pick(3);
+  assert.deepEqual(f.calls.at(-1), ['perm', 'session-perm', '/permission danger-full-access']);
+});
+
+test('QQ permission page degrades to a notice when presets are unavailable', async (t) => {
+  const f = await fixture(t);
+  await f.state.setSession(f.route, 'session-perm-down');
+  const original = f.harness.workspaceSession;
+  f.harness.workspaceSession = (id) => ({ ...original(id), permissions: async () => { throw new Error('down'); } });
+
+  await f.send('/m permissions');
+  assert.match(f.latestMenu().text, /暂时无法获取权限档位/);
+  // 仍保留返回入口。
+  assert.equal(f.latestMenu().keyboard.content.rows.flatMap((r) => r.buttons).length, 1);
+
+  // 未绑定会话时同样降级，不抛错。
+  await f.state.clearSession(f.route);
+  f.harness.workspaceSession = (id) => ({ ...original(id), permissions: undefined });
+  await f.send('/m permissions');
+  assert.match(f.latestMenu().text, /暂时无法获取权限档位/);
+});
+
 test('QQ status, help and partial catalogs retain usable navigation and escape Markdown labels', async (t) => {
   const f = await fixture(t);
   await f.send('/m status');
@@ -367,7 +416,7 @@ test('QQ status, help and partial catalogs retain usable navigation and escape M
   f.harness.listModels = async () => { throw new Error('catalog down'); };
   f.harness.workspaceSession = () => ({ models: f.harness.listModels });
   await f.send('/m');
-  assert.equal(f.latestMenu().keyboard.content.rows.flatMap((r) => r.buttons).length, 14);
+  assert.equal(f.latestMenu().keyboard.content.rows.flatMap((r) => r.buttons).length, 15);
   assert.match(f.latestMenu().text, /部分设置暂未加载/);
   const view = { title: '菜单', entries: [{ label: '[标题](https://example.invalid)', action: { kind: 'command', text: '/new' } }] };
   assert.ok(qqMenuText(view).includes('[标题]'));

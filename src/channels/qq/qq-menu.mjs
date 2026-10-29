@@ -1,12 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError } from '@tencent-connect/qqbot-nodejs';
+import { description as permissionDescription } from '../shared/permission-command.mjs';
 import { workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { t } from '../shared/i18n.mjs';
 
 export const QQ_MENU_TTL_MS = 15 * 60_000;
 const PAGE_SIZE = 6;
 const MAX_MENUS = 256;
-const SECTIONS = new Set(['main', 'sessions', 'workspaces', 'presets', 'models', 'steer', 'custom', 'status', 'help']);
+const SECTIONS = new Set(['main', 'sessions', 'workspaces', 'presets', 'permissions', 'models', 'steer', 'custom', 'status', 'help']);
 const clean = (value, limit = 160) => [...String(value ?? '').replace(/[\p{Cc}\p{Cf}]/gu, ' ')].slice(0, limit).join('');
 const command = (label, text) => ({ label, action: { kind: 'command', text } });
 const section = (label, name) => ({ label, action: { kind: 'section', name } });
@@ -123,6 +124,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
       columns: 3, entries: name === 'status' ? [back()] : [
         section(t('💬 会话选择'), 'sessions'), section(t('📁 工作区'), 'workspaces'), section(t('🤖 模式／预设'), 'presets'),
         section(t('🧠 模型'), 'models'), command(t('🆕 新会话'), '/new'), section(t('📋 会话列表'), 'sessions'),
+        section(t('🔓 权限'), 'permissions'),
         command(t('⏹ 停止'), '/stop'), command(t('📐 压缩'), '/compact'), command(t('🧹 清空上下文'), '/clear'), section(t('💬 补充指令'), 'steer'),
         { label: t('切换归档显示'), action: { kind: 'archive', include: !archived } },
         // 与 /progress 文字命令同一开关：按钮替用户发那条命令，标签随当前状态翻转。
@@ -159,6 +161,42 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
         `/preset ${/^\d+$/u.test(item.id) ? 'id:' : ''}${item.id}`)),
     ] });
   }
+  if (name === 'permissions') {
+    // 打开页面即拉取档位：按钮发完整 ID 而非序号——/permission <序号> 依赖
+    // /permissionlist 留下的快照，菜单点一下就该生效，不能让人先刷一次列表。
+    const sessionId = state.sessionFor(key);
+    const session = sessionId && typeof harness.workspaceSession === 'function'
+      ? harness.workspaceSession(sessionId, key) : null;
+    const unavailable = {
+      title: t('🔓 权限档位'),
+      detail: t('暂时无法获取权限档位，请稍后重试。'),
+      entries: [back()],
+    };
+    if (typeof session?.permissions !== 'function') return unavailable;
+    try {
+      const current = await session.permissions(options);
+      const list = Array.isArray(current?.options) ? current.options : [];
+      const label = (item) => {
+        const name = clean(item.name) || clean(item.value);
+        // 与 /permissionlist 共用同一套描述汉化，两边看到的话一致。
+        const detail = clean(permissionDescription(item), 120);
+        return `${item.value === current.currentValue ? '✓ ' : ''}${name}${detail ? ` — ${detail}` : ''}`;
+      };
+      return {
+        title: t('🔓 权限档位'),
+        detail: [
+          t('当前权限：{id}', { id: clean(current.currentValue) }),
+          t('切换后立即生效，仅影响当前会话。'),
+        ].join('\n'),
+        entries: [
+          ...list.map((item) => command(label(item), `/permission ${item.value}`)),
+          back(),
+        ],
+      };
+    } catch {
+      return unavailable;
+    }
+  }
   if (name === 'steer') return { title: t('💬 补充指令'), columns: 2,
     detail: t('给当前正在运行的任务补充指令。'), entries: [
       ...['继续', '加速运行', '总结当前进展', '更简洁些', '更详细些'].map((text) => command(t(text), `/steer ${t(text)}`)),
@@ -167,7 +205,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
   if (name === 'custom') return { title: t('自定义指令'), detail: t('请发送 /steer 你的补充指令。'), entries: [back()] };
   return { title: t('📖 帮助'), detail: [
     t('发送 /m 打开助手中心，点击按钮或回复当前列表的数字选择。'),
-    t('设置：会话、工作区、模式／预设、模型。'),
+    t('设置：会话、工作区、模式／预设、模型、权限档位。'),
     t('会话：新会话、会话列表、归档显示切换。'),
     t('任务：停止、压缩、清空上下文、快捷或自定义补充指令。'),
     t('信息：状态、帮助。'),

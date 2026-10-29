@@ -1050,6 +1050,11 @@ export class QqHarnessBridge {
       if (/^\/progress(?:\s|$)/u.test(command)) {
         return { message: await this.#runProgressCommand(command) };
       }
+      // 权限档位同理：文字路径由 commandRunner 接，菜单路径必须在此接，
+      // 否则 /permission <id> 会被当成工作区命令无声吞掉。
+      if (isPermissionCommand(command)) {
+        return runPermissionCommand(command, this.#harness, this.#state, key, options);
+      }
       return runWorkspaceCommand(command, this.#harness, key);
     };
     // Stop/steer must stay available while a slower menu mutation is pending.

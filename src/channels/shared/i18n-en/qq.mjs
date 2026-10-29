@@ -109,4 +109,10 @@ export default {
   '工具通知：{state}': 'Tool notices: {state}',
   '开启': 'on',
   '关闭': 'off',
+  '🔓 权限': '🔓 Permissions',
+  '🔓 权限档位': '🔓 Permission presets',
+  '当前权限：{id}': 'Current permission: {id}',
+  '切换后立即生效，仅影响当前会话。': 'Applies immediately, to this conversation only.',
+  '设置：会话、工作区、模式／预设、模型、权限档位。':
+    'Settings: conversation, workspace, mode/preset, model, permission preset.',
 };
