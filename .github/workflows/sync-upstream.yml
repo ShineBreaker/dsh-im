@@ -40,7 +40,20 @@ jobs:
             echo 'changed=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git merge --no-edit upstream/main
+          if git merge --no-edit upstream/main; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # lib/ 是 npm run build 的产物、无语义，冲突时取上游版本即可，后面的
+          # build 会用合并后的 src 重新生成。其余文件的冲突必须人工裁决：保留
+          # 现场并失败，交给 Report failure 建 issue。
+          for f in $(git diff --name-only --diff-filter=U); do
+            case "$f" in
+              lib/*) git checkout --theirs -- "$f" && git add "$f" ;;
+              *) echo "::error::非构建产物冲突，需人工解决：$f"; exit 1 ;;
+            esac
+          done
+          git commit --no-edit
           echo 'changed=true' >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
@@ -58,6 +71,16 @@ jobs:
         if: steps.merge.outputs.changed == 'true'
         run: npm run check
 
+      # npm run check 内含 build；打包产物必须随合并一起提交，否则推送出去的
+      # lib/ 仍是合并现场而不是重新生成的结果。
+      - name: Commit rebuilt bundles
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          if ! git diff --quiet -- lib; then
+            git add lib
+            git commit --amend --no-edit
+          fi
+
       - name: Push merged main
         if: steps.merge.outputs.changed == 'true'
         run: git push origin HEAD:main
@@ -65,17 +88,23 @@ jobs:
       - name: Report failure
         if: failure()
         run: |
-          gh issue create \
-            --title "上游同步失败 $(date -u +%F)" \
-            --body "$(printf '%s\n' \
-              '每日同步 upstream/main 的自动合并没有通过，main 未被修改。' \
-              '' \
-              "- 运行记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              '' \
-              '常见原因：合并冲突，或合入后 `npm run check` 失败。' \
-              '处理方式：本地 `git fetch upstream && git merge upstream/main`，解决后跑 `npm run check` 再推送。')" \
-            --label 'upstream-sync' \
-            || gh issue create --title "上游同步失败 $(date -u +%F)" \
-              --body "运行记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # bash -e 下每条 gh 失败都会中断；这里显式兜底，保证任何一条路都
+          # 留下痕迹：优先带 label，退回无 label，再退回 ::error:: 日志。
+          body="$(printf '%s\n' \
+            '每日同步 upstream/main 的自动合并没有通过，main 未被修改。' \
+            '' \
+            "- 运行记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '' \
+            '常见原因：非构建产物冲突，或合入后 `npm run check` 失败。' \
+            '处理方式：本地 `git fetch upstream && git merge upstream/main`，解决后跑 `npm run check` 再推送。')"
+          if gh issue create --title "上游同步失败 $(date -u +%F)" --body "$body" --label 'upstream-sync'; then
+            exit 0
+          fi
+          echo '::warning::带 label 的 issue 创建失败，退回无 label 重试'
+          if gh issue create --title "上游同步失败 $(date -u +%F)" --body "$body"; then
+            exit 0
+          fi
+          echo '::error::issue 创建失败（仓库可能禁用了 Issues），失败详情如下：'
+          echo "::error::$body"
         env:
           GH_TOKEN: ${{ github.token }}
