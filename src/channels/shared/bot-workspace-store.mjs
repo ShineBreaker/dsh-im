@@ -13,10 +13,11 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   normalizeAgentPresetCatalog,
+  normalizeAgentPresetId,
   validateAgentPresetId,
 } from './agent-preset.mjs';
 import {
@@ -1348,6 +1349,7 @@ export class BotWorkspaceStore {
     incarnation,
     expectedGeneration,
     expectedConversationGeneration,
+    preserveBotWorkspace = false,
   } = {}) {
     const id = botIdOf(botId);
     if (typeof conversationKey !== 'string' || !conversationKey
@@ -1399,8 +1401,9 @@ export class BotWorkspaceStore {
       // workspace switch queued while the session was being adopted must not be
       // silently overwritten by the binding that started before it.
       assertConversationCurrent();
-      if (this.conversationDirectoryFor(id).enabled) {
-        if (!(await sameWorkspacePath(workspace, this.conversationWorkspaceFor(id, conversationKey)))) {
+      if (this.conversationDirectoryFor(id).enabled || preserveBotWorkspace) {
+        if (!preserveBotWorkspace
+          && !(await sameWorkspacePath(workspace, this.conversationWorkspaceFor(id, conversationKey)))) {
           throw workspaceManualEditDisabled();
         }
         assertConversationCurrent();
@@ -2127,6 +2130,71 @@ export function createBotWorkspaceScope(
           return workspaces.conversationWorkspaceFor(botId, conversationKey);
         };
       }
+      if (property === 'resolveConversationWorkspace') {
+        return async (conversationKey, options = {}) => {
+          options.signal?.throwIfAborted();
+          assertCurrentBotScope(isCurrentScope);
+          const pending = pendingConversationSwitches.get(conversationKey);
+          if (pending) await pending;
+          await workspaces.whenBotIdle(botId);
+          assertCurrentBotScope(isCurrentScope);
+          const generation = workspaces.generationFor(botId);
+          const conversationGeneration = currentConversationGeneration(conversationKey);
+          const sessionId = scopedState.sessionFor(conversationKey);
+          const configured = workspaces.conversationWorkspaceFor(botId, conversationKey);
+          const preset = workspaces.agentPresetFor(botId);
+          const assertUnchanged = () => {
+            options.signal?.throwIfAborted();
+            assertCurrentBotScope(isCurrentScope);
+            if (generation !== workspaces.generationFor(botId)
+              || conversationGenerationIsStale(conversationKey, conversationGeneration)
+              || sessionId !== scopedState.sessionFor(conversationKey)
+              || (!sessionId && preset !== workspaces.agentPresetFor(botId))) {
+              throw workspaceSessionStale('The conversation changed while its workspace was being resolved.');
+            }
+          };
+          if (sessionId) {
+            const known = sessionGenerations.get(sessionId)?.workspace;
+            if (known) {
+              assertUnchanged();
+              return known;
+            }
+            // The configured bot directory stays unchanged when a preset groups
+            // a new session. Recover its actual owner after a restart, without
+            // adopting the session or moving an older chat to the new preset.
+            if (typeof target.rpc === 'function') {
+              const listed = await target.rpc('workspace.list', {}, 30_000, options);
+              assertUnchanged();
+              if (!Array.isArray(listed?.items)) throw new TypeError('Harness returned an invalid workspace list');
+              const owners = listed.items.filter((item) => Array.isArray(item?.sessionIds)
+                && item.sessionIds.includes(sessionId));
+              if (owners.length > 1) throw new TypeError('Harness returned multiple session workspaces');
+              const workspace = owners[0]?.path ?? configured;
+              if (typeof workspace !== 'string' || !isAbsolute(workspace)) {
+                throw new TypeError('Harness returned an invalid session workspace');
+              }
+              sessionGenerations.set(sessionId, { ...sessionGenerations.get(sessionId), workspace });
+              return workspace;
+            }
+            return configured;
+          }
+          // With no binding (including after /new), list the next preset's
+          // existing group. A read never creates a directory or registers it.
+          if (preset && workspaces.groupsByAgentPreset?.(botId)
+            && !workspaces.hasConversationWorkspaceOverride(botId, conversationKey)
+            && await target.isUngroupedWorkspace?.(configured)) {
+            const directory = join(configured, 'presets', preset);
+            const exists = await stat(directory).then((entry) => entry.isDirectory(), (error) => {
+              if (error?.code === 'ENOENT') return false;
+              throw error;
+            });
+            assertUnchanged();
+            if (exists) return directory;
+          }
+          assertUnchanged();
+          return configured;
+        };
+      }
       if (property === 'hasConversationWorkspaceOverride') {
         return (conversationKey) => {
           assertCurrentBotScope(isCurrentScope);
@@ -2251,6 +2319,17 @@ export function createBotWorkspaceScope(
             || adopted.sessionId !== sessionId || typeof adopted.workspace !== 'string') {
             throw new TypeError('Harness returned an invalid adopted workspace session');
           }
+          // Selecting another session in the current automatic group must not
+          // turn that group into the bot's manual directory and clear every
+          // other conversation. Explicit cross-workspace selection keeps its
+          // existing bot-wide semantics.
+          const baseWorkspace = workspaces.workspaceFor(botId);
+          const preserveBotWorkspace = !workspaces.hasConversationWorkspaceOverride(botId, conversationKey)
+            && normalizeAgentPresetId(basename(adopted.workspace)) !== null
+            && await target.isUngroupedWorkspace?.(baseWorkspace)
+            && await sameWorkspacePath(dirname(adopted.workspace), join(baseWorkspace, 'presets'))
+            && await sameWorkspacePath(adopted.workspace,
+              await scopedHarness.resolveConversationWorkspace(conversationKey));
           const bound = await workspaces.bindWorkspaceSession(botId, adopted.workspace, {
             conversationKey,
             sessionId,
@@ -2261,6 +2340,7 @@ export function createBotWorkspaceScope(
             incarnation,
             expectedGeneration,
             expectedConversationGeneration,
+            preserveBotWorkspace,
           });
           if (!isCurrentScope()) {
             const error = new Error('找不到要修改的机器人。');

@@ -11,6 +11,9 @@ import {
 } from '../src/channels/shared/bot-workspace-store.mjs';
 import { ConversationStateStore } from '../src/channels/shared/conversation-state-store.mjs';
 import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
+import { runWorkspaceCommand, workspacePathSnapshot } from '../src/channels/shared/workspace-command.mjs';
+import { qqMenuView } from '../src/channels/qq/qq-menu.mjs';
+import { dingtalkMenuSnapshot } from '../src/channels/dingtalk/dingtalk-menu.mjs';
 
 const catalog = {
   defaultId: 'standard',
@@ -58,8 +61,17 @@ async function fixture(t) {
     createSession: async (options) => {
       const sessionId = `session-${sessions.length}`;
       sessions.push({ sessionId, options });
+      items.find((item) => item.path === options.workspace)?.sessionIds.push(sessionId);
       return sessionId;
     },
+    listWorkspaces: async () => items.map((item) => item.path),
+    listWorkspaceSessions: async (workspace) => ({
+      workspace,
+      sessions: sessions.filter((session) => session.options.workspace === workspace),
+    }),
+    adoptWorkspaceSession: async (sessionId) => ({
+      sessionId, workspace: sessions.find((session) => session.sessionId === sessionId).options.workspace,
+    }),
     sessionExists: async () => true,
     ask: async (sessionId) => sessionId,
   };
@@ -200,11 +212,116 @@ test('conversation overrides and Feishu directory isolation take precedence over
   await scope.harness.switchConversationWorkspace('manual', f.manual);
   await askInWorkspaceSession({ ...scope, key: 'manual', text: 'hello' });
   assert.equal(f.sessions[0].options.workspace, f.manual);
+  assert.equal(await scope.harness.resolveConversationWorkspace('manual'), f.manual);
   assert.equal(f.items.length, 0);
   await workspaces.setConversationDirectory('bot', { enabled: true });
   await askInWorkspaceSession({ ...scope, key: 'isolated', text: 'hello' });
   assert.equal(f.sessions[1].options.workspace, workspaces.conversationWorkspaceFor('bot', 'isolated'));
+  assert.equal(await scope.harness.resolveConversationWorkspace('isolated'), f.sessions[1].options.workspace);
   assert.notEqual(f.sessions[1].options.workspace, f.base);
   assert.notEqual(dirname(f.sessions[1].options.workspace), join(f.base, 'presets'));
   assert.equal(f.items.length, 0);
+});
+
+async function conversationFixture(t) {
+  const f = await fixture(t);
+  const workspacePath = join(f.root, 'workspaces.json');
+  const statePath = join(f.root, 'state.json');
+  const workspaces = await new BotWorkspaceStore(workspacePath, {
+    defaultWorkspace: f.base, groupByAgentPreset: true,
+  }).load();
+  await workspaces.ensure('bot');
+  const state = await new ConversationStateStore(statePath).load();
+  const scope = createBotWorkspaceScope(f.harness, { botId: 'bot', workspaces, state, agentPresetCatalog: catalog });
+  const ask = (key) => askInWorkspaceSession({ ...scope, key, text: 'hello' });
+  const old = await ask('old');
+  await scope.harness.updateAgentPreset('research');
+  const grouped = await ask('grouped');
+  const reload = async (groupByAgentPreset = true) => createBotWorkspaceScope(f.harness, {
+    botId: 'bot',
+    workspaces: await new BotWorkspaceStore(workspacePath, { defaultWorkspace: f.base, groupByAgentPreset }).load(),
+    state: await new ConversationStateStore(statePath).load(),
+    agentPresetCatalog: catalog,
+  });
+  return { ...f, workspaces, state, scope, old, grouped, ask, reload };
+}
+
+test('preset /sessions and /session N use the same group without changing other chats', async (t) => {
+  const f = await conversationFixture(t);
+  const another = await f.ask('another');
+  const listing = await runWorkspaceCommand('/sessions', f.scope.harness, 'another');
+  assert.ok(listing.message.includes(f.grouped.sessionId));
+  assert.ok(listing.message.includes(another.sessionId));
+  assert.ok(!listing.message.includes(f.old.sessionId));
+  const explicit = await runWorkspaceCommand('/sessionlist 1', f.scope.harness, 'another');
+  assert.ok(explicit.message.includes(f.old.sessionId), explicit.message);
+  assert.ok(!explicit.message.includes(f.grouped.sessionId));
+  const selected = await runWorkspaceCommand('/session 1', f.scope.harness, 'another');
+  assert.ok(selected.message.includes(f.grouped.sessionId), selected.message);
+  assert.equal(f.state.sessionFor('another'), f.grouped.sessionId);
+  assert.equal(f.state.sessionFor('grouped'), f.grouped.sessionId);
+  assert.equal(f.state.sessionFor('old'), f.old.sessionId);
+  assert.equal(f.workspaces.workspaceFor('bot'), f.base);
+});
+
+for (const enabled of [true, false]) {
+  test(`restart resolves the bound group with grouping ${enabled ? 'enabled' : 'disabled'}`, async (t) => {
+    const f = await conversationFixture(t);
+    await f.scope.harness.updateAgentPreset('other');
+    const scope = await f.reload(enabled);
+    const before = f.calls.length;
+    const grouped = await runWorkspaceCommand('/sessions', scope.harness, 'grouped');
+    const old = await runWorkspaceCommand('/sessions', scope.harness, 'old');
+    assert.ok(grouped.message.includes(f.grouped.sessionId), grouped.message);
+    assert.ok(!grouped.message.includes(f.old.sessionId));
+    assert.ok(old.message.includes(f.old.sessionId), old.message);
+    assert.ok(!old.message.includes(f.grouped.sessionId));
+    assert.ok(f.calls.slice(before).every((call) => call.method === 'workspace.list'));
+    assert.equal(scope.state.sessionFor('old'), f.old.sessionId);
+    const snapshot = await workspacePathSnapshot(scope.harness, { conversationKey: 'grouped' });
+    assert.equal(snapshot.current, join(f.base, 'presets', 'research'));
+  });
+}
+
+test('after /new the list follows the next preset without creating a session', async (t) => {
+  const f = await conversationFixture(t);
+  await f.state.clearSession('grouped');
+  const listing = await runWorkspaceCommand('/sessions', f.scope.harness, 'grouped');
+  assert.ok(listing.message.includes(f.grouped.sessionId), listing.message);
+  assert.equal(f.sessions.length, 2);
+  assert.equal(f.state.sessionFor('grouped'), null);
+});
+
+test('QQ and DingTalk menu session choices resolve the group after restart', async (t) => {
+  const f = await conversationFixture(t);
+  const scope = await f.reload();
+  const qq = await qqMenuView('sessions', scope.harness, scope.state, 'grouped');
+  assert.ok(JSON.stringify(qq).includes(`/session ${f.grouped.sessionId}`));
+  assert.ok(!JSON.stringify(qq).includes(`/session ${f.old.sessionId}`));
+  const dingtalk = await dingtalkMenuSnapshot(scope.harness, scope.state, 'grouped');
+  assert.equal(dingtalk.sessionWorkspace, join(f.base, 'presets', 'research'));
+  assert.ok(dingtalk.selections.session.some(([, command]) => command === `/session ${f.grouped.sessionId}`));
+  assert.ok(!dingtalk.selections.session.some(([, command]) => command === `/session ${f.old.sessionId}`));
+});
+
+test('a workspace switch during registry lookup cannot publish a stale group', async (t) => {
+  const f = await conversationFixture(t);
+  const scope = await f.reload();
+  const rpc = f.harness.rpc;
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  f.harness.rpc = async (...args) => {
+    const result = await rpc(...args);
+    if (args[0] === 'workspace.list') { entered(); await blocked; }
+    return result;
+  };
+  const resolving = scope.harness.resolveConversationWorkspace('grouped');
+  const rejected = assert.rejects(resolving, { code: 'workspace-session-stale' });
+  await started;
+  await scope.harness.switchConversationWorkspace('grouped', f.manual);
+  release();
+  await rejected;
+  assert.equal(await scope.harness.resolveConversationWorkspace('grouped'), f.manual);
 });
