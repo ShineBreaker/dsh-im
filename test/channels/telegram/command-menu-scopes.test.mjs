@@ -9,8 +9,10 @@ import {
   telegramCommandMenuScopes,
 } from '../../../src/channels/telegram/telegram-runtime.mjs';
 
+// /workspacelist stays typeable (and stays in /help) but main keeps it out of
+// the native menu: /workspace with no argument already lists the workspaces.
 const MAIN_MENU_NAMES = [
-  'new', 'compact', 'clear', 'history', 'workspace', 'conv', 'workspacelist',
+  'new', 'compact', 'clear', 'history', 'workspace', 'conv',
   'sessionlist', 'session', 'models', 'reasoninglist', 'reasoning', 'model',
   'presetlist', 'preset', 'stop', 'steer', 'batch', 'send', 'cancel',
   'status', 'version', 'help',

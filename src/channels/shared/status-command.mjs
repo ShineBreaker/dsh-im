@@ -72,6 +72,32 @@ async function settled(operation) {
 }
 
 /**
+ * A status field is optional AND must not outlive its deadline.
+ *
+ * The abort signal alone is not enough: the real Host chain
+ * (`agentPresetSettings()` reads the preset directory before it re-checks the
+ * signal) can ignore it and never settle, which would hold the whole reply
+ * open. Race the read against its own timer so the deadline holds no matter
+ * how the underlying RPC behaves; the signal still lets cooperative readers
+ * cancel their work early.
+ */
+function settledWithin(operation, timeoutMs) {
+  return new Promise((resolve) => {
+    let settledAlready = false;
+    const finish = (value) => {
+      if (settledAlready) return false;
+      settledAlready = true;
+      clearTimeout(timer);
+      resolve(value ?? null);
+      return true;
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    timer.unref?.();
+    (async () => operation())().then(finish, () => finish(null));
+  });
+}
+
+/**
  * Render one readable /status reply for the text channels.
  *
  * The first line is the historical connection confirmation. Everything after
@@ -120,9 +146,9 @@ export async function runStatusCommand({
       : null))
     : null;
   const [model, preset, running] = await Promise.all([
-    session ? settled(() => readModel(session, fieldOptions)) : null,
-    settled(() => readPreset(harness, fieldOptions)),
-    session ? settled(() => readRunning(session, fieldOptions)) : false,
+    session ? settledWithin(() => readModel(session, fieldOptions), fieldTimeout) : null,
+    settledWithin(() => readPreset(harness, fieldOptions), fieldTimeout),
+    session ? settledWithin(() => readRunning(session, fieldOptions), fieldTimeout) : false,
   ]);
   if (model) lines.push(t('当前模型：{model}', { model }));
   else if (!session) lines.push(t('当前模型：暂无（创建会话后显示）'));

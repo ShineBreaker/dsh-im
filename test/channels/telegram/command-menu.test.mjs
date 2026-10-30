@@ -12,8 +12,10 @@ import { telegramCommandMenu } from '../../../src/channels/telegram/telegram-run
 
 // The native Telegram menu only carries primary command names. Aliases stay
 // typeable (and stay in /help), so they are asserted as accepted input below.
+// /workspacelist stays typeable and stays in /help, but main already keeps it
+// out of the native menu: /workspace (alias /ws) covers listing and switching.
 const MAIN_MENU_NAMES = [
-  'new', 'compact', 'clear', 'history', 'workspace', 'conv', 'workspacelist',
+  'new', 'compact', 'clear', 'history', 'workspace', 'conv',
   'sessionlist', 'session', 'models', 'reasoninglist', 'reasoning', 'model',
   'presetlist', 'preset', 'stop', 'steer', 'batch', 'send', 'cancel',
   'status', 'version', 'help',

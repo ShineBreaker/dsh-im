@@ -178,6 +178,7 @@ test('status localizes every added line', async (t) => {
 test('a stuck Host cannot hold /status open: optional reads are bounded', async () => {
   assert.ok(Number.isSafeInteger(STATUS_FIELD_TIMEOUT_MS) && STATUS_FIELD_TIMEOUT_MS > 0
     && STATUS_FIELD_TIMEOUT_MS <= 5_000, 'the shared field timeout stays short');
+  // Cooperative reader: it honours the abort signal the status command passes.
   const never = (options) => new Promise((_, reject) => {
     options?.signal?.addEventListener(
       'abort',
@@ -242,4 +243,71 @@ test('text channels without workspace or preset APIs (iMessage/Email) still answ
     '绑定会话：未绑定（发送消息后自动创建）',
     '当前模型：暂无（创建会话后显示）',
   ], 'missing optional harness APIs degrade to the connection + binding lines');
+});
+
+// Regression: the real Host preset chain (`agentPresetSettings()` →
+// `createBotWorkspaceScope`) reads the preset directory BEFORE it re-checks the
+// abort signal, so a stuck directory read never observes the status deadline.
+// A signal-only timeout therefore still held the whole reply open. The deadline
+// must be enforced by the status command itself.
+test('a Host read that ignores the abort signal still cannot hold /status open', async () => {
+  const ignoresSignal = () => new Promise(() => {});
+  const harness = {
+    async ensureRunning() {},
+    currentWorkspace: () => WORKSPACE,
+    currentConversationWorkspace: () => WORKSPACE,
+    workspaceSession: () => ({
+      sessionExists: async () => true,
+      models: ignoresSignal,
+      isRunning: ignoresSignal,
+    }),
+    agentPresetSettings: ignoresSignal,
+  };
+  const startedAt = Date.now();
+  const result = await runStatusCommand({
+    descriptor: { label: 'Telegram' },
+    harness,
+    state: stateWithSession(SESSION_ID),
+    conversationKey: 'direct:chat-a',
+    fieldTimeoutMs: 50,
+  });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 1_000, `the deadline must hold without cooperation, took ${elapsed} ms`);
+  assert.deepEqual(result.message.split('\n'), [
+    'Telegram机器人与 DeepSeek Harness 连接正常。',
+    `工作区：${WORKSPACE}`,
+    '绑定会话：session-abcd…',
+  ], 'reads that never settle are omitted, the connection line still arrives');
+});
+
+test('an uncooperative /status field still resolves the same reply twice is impossible', async () => {
+  const ignoresSignal = () => new Promise(() => {});
+  const harness = {
+    async ensureRunning() {},
+    currentWorkspace: () => WORKSPACE,
+    currentConversationWorkspace: () => WORKSPACE,
+    workspaceSession: () => ({
+      sessionExists: async () => true,
+      models: ignoresSignal,
+      isRunning: async () => true,
+    }),
+    agentPresetSettings: ignoresSignal,
+  };
+  const first = await runStatusCommand({
+    descriptor: { label: 'Telegram' },
+    harness,
+    state: stateWithSession(SESSION_ID),
+    conversationKey: 'direct:chat-a',
+    fieldTimeoutMs: 30,
+  });
+  const second = await runStatusCommand({
+    descriptor: { label: 'Telegram' },
+    harness,
+    state: stateWithSession(SESSION_ID),
+    conversationKey: 'direct:chat-a',
+    fieldTimeoutMs: 30,
+  });
+  assert.equal(first.message, second.message);
+  assert.match(first.message, /运行中任务：有/, 'a cooperating read still lands');
+  assert.doesNotMatch(first.message, /当前模型/);
 });
