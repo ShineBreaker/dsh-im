@@ -68,6 +68,53 @@ test('DS Bot client rejects an unconfirmed applied model', async () => {
   }), { code: 'model-selection-mismatch' });
 });
 
+test('DS Bot client never dispatches an already cancelled model update', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let requests = 0;
+  const client = createDsBotClient({
+    connection: {
+      createSharedFetchHandler: () => ({
+        async fetch() {
+          requests++;
+          return Response.json({ ok: true, value: {
+            id: bot.id, model: 'provider/new', appliedModel: 'provider/new',
+          } });
+        },
+      }),
+    },
+  });
+  await assert.rejects(client.updateBotModel(bot.id, {
+    provider: 'provider', model: 'new',
+  }, { signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(requests, 0);
+});
+
+test('DS Bot model update forwards cancellation to its in-flight request', async () => {
+  const controller = new AbortController();
+  let requestSignal;
+  const client = createDsBotClient({
+    connection: {
+      createSharedFetchHandler: () => ({
+        async fetch(request) {
+          requestSignal = request.signal;
+          assert.equal(requestSignal.aborted, false);
+          controller.abort();
+          requestSignal.throwIfAborted();
+          return Response.json({ ok: true, value: {
+            id: bot.id, model: 'provider/new', appliedModel: 'provider/new',
+          } });
+        },
+      }),
+    },
+  });
+  await assert.rejects(client.updateBotModel(bot.id, {
+    provider: 'provider', model: 'new',
+  }, { signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(requestSignal.reason, controller.signal.reason);
+});
+
 test('legacy iMessage direct keys cannot disguise native group chats as private', () => {
   assert.equal(privateDeliverySuggestionFromConversationKey('imessage', 'direct:iMessage;+;chat123'), null);
   assert.equal(privateDeliverySuggestionFromConversationKey('imessage', 'direct:unknown'), null);
@@ -243,6 +290,30 @@ test('bound model selection rejects stale and missing DS Bot without mutating an
   assert.doesNotMatch(result.message, /模型已切换为：/);
   assert.deepEqual(f.modelCalls, []);
 });
+
+for (const command of ['/model provider-one/new max', '/reasoning --default']) {
+  test(`bound ${command} cancelled during Bot resolution never updates the model`, async (t) => {
+    const f = await fixture(t, { channel: 'feishu', key: 'p2p:ou_owner' });
+    await f.service.bindDsBot('im-one', f.key, bot.id);
+    const controller = new AbortController();
+    const resolve = f.dsBot.resolve;
+    let resolutions = 0;
+    f.dsBot.resolve = async (id) => {
+      const current = await resolve(id);
+      // The command first resolves its session, then rechecks the Bot just
+      // before selecting. Simulate bridge shutdown during that second read.
+      if (++resolutions === 2) controller.abort();
+      return current;
+    };
+    const result = await runModelCommand(command, f.scope.harness, f.scope.state, f.key, {
+      signal: controller.signal,
+    });
+    assert.equal(resolutions, 2);
+    assert.match(result.message, /切换已取消/);
+    assert.deepEqual(f.modelCalls, []);
+    assert.equal(f.state.sessionFor(f.key), bot.sessionId);
+  });
+}
 
 test('binding needs no delivery target, and ordinary sync settings cannot disable or duplicate its sync', async (t) => {
   const f = await fixture(t);

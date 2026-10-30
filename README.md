@@ -261,6 +261,51 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 
 支持全局面板的 DSH 在左侧边栏提供「IM机器人」，沿用插件页的双对话框造型，以单色细线图标显示，点击打开完整 IM 管理面板。原「设置 → IM机器人」和插件详情页的「打开 IM机器人」入口保留。宿主也可通过可选客户端服务 `dshImClient` 嵌入面板；接口、兼容要求与接入示例见[客户端接入文档](docs/client-integration.md)。
 
+### 会话 → 对话反查（宿主服务）
+
+其他插件常常只拿得到会话 id，却需要知道这个会话属于哪个渠道、哪个机器人、哪个群和哪个话题。宿主服务 `dshIm` 为此提供一个只读方法：
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null —— 该会话不属于任何 IM 对话
+// 否则：
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- 只读：不访问网络、不创建会话、不阻塞回复，也不抛错；未知会话返回 `null`。
+- 数据全部来自插件自己的状态文件（`sessions` 映射）与机器人配置，不要求内核新增字段。
+- `chatType` 为 `group`、`thread` 或 `dm`；`direct:dm:<id>` 形式的键会把 `<id>` 填进 `senderId`。
+- 每个会话首次反查写一行日志 `[dsh-im] describeConversation session=… chat=… sender=…`，之后不再重复。
+- 发言人会被记住：桥接在把消息交给会话之前，把 `senderId`、显示名、`username` 与「是否机器人」写进机器人状态文件（`authors`），每条新消息覆盖前一条，只保留身份、不保留文本；因此重启后仍然可读。
+- 私聊的 `senderId` 还可以从键 `direct:dm:<id>` 推出，即使作者记录缺失也有值；群聊作者在第一条入站消息之前为 `null`。
+
+同一个反查还有一个同步版本，供在同步上下文里组装的场景使用（例如系统提示词的渲染）：
+
+```js
+const info = dshIm.describeConversationSync(sessionId);
+```
+
+- 没有 `await`：只读本进程已经加载的机器人状态，绝不发起加载、访问网络或启动账户查询。
+- 因此该机器人状态尚未加载时返回 `null` —— 调用方要自己决定「未知」意味着什么；异步版本会在需要时加载并给出 `botName`，同步版本 `botName` 恒为 `null`。
+- 已经处理过消息的机器人，其状态一定在内存里，所以活跃会话的第一次提示词组装就能拿到身份。
+
+### 对话绑定的两个事件
+
+写入绑定时，通道会同步发出事件，订阅方不必反查就能维持自己的「会话 → 身份」表：
+
+| 事件 | 何时发出 | 载荷 |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | 对话绑定到某个会话，且在 `session.create` 之前 | `channel`、`botId`、`sessionId`、`conversationKey`、`chatType`、`chatId`、`threadId`、`senderId`、`senderName` |
+| `dsh-im/session-unbind` | 对话不再指向原会话：切换到另一个会话，或绑定被清除 | 同上，但没有作者字段；`sessionId` 是被解绑的旧会话 |
+
+- 两个事件同步发出，顺序是「先解绑旧的、再绑定新的」，订阅方能一条线读完。
+- 只有真正提交的写入才会发事件：写入被拒绝（返回 `false`）或写成同一个会话时不发 `unbind`。
+- 清除一个会话绑定（`clearSession`）和清除全部绑定（`clearSessions`）同样会按对话逐个发 `session-unbind`。
+- 订阅方抛错不影响消息处理。
+- 解绑不代表会话的身份消失：把它留在自己的表里（例如带 `superseded_at`）仍可让独占该会话的定时任务继续投递到原来的对话，只是「谁拥有这个对话」要按最新一次绑定算。
+
 ### 上下文增强
 
 [查看上下文增强说明](docs/上下文增强.md)

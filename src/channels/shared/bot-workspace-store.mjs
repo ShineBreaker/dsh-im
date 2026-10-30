@@ -2422,8 +2422,10 @@ export function createBotWorkspaceScope(
               if (!dsBotId) {
                 return invokeCurrentSession('selectSessionModel', [selection, options], 'model selection');
               }
+              options.signal?.throwIfAborted();
               if (!isCurrentSession()) throw workspaceSessionStale('DS Bot binding changed before model selection.');
               const bot = await dsBot?.resolve(dsBotId);
+              options.signal?.throwIfAborted();
               if (!bot || bot.sessionId !== sessionId || !isCurrentSession()) {
                 throw workspaceSessionStale('DS Bot changed before model selection.');
               }
