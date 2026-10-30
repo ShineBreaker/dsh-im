@@ -1,3 +1,4 @@
+import { ensurePresetWorkspace } from './preset-workspaces.mjs';
 import { t } from './i18n.mjs';
 import { normalizeBusyMessageMode, validateBusyMessageMode } from './message-mode.mjs';
 import { atConnectionStage, connectionStageError, extractConnectionEvidence } from './connection-error.mjs';
@@ -488,6 +489,7 @@ export class BotWorkspaceStore {
   #path;
   #defaultWorkspace;
   #ungroupedWorkspace;
+  #groupByAgentPreset;
   #version = 1;
   #workspaces = {};
   #agentPresets = {};
@@ -514,11 +516,12 @@ export class BotWorkspaceStore {
   #writeQueue = Promise.resolve();
   #botQueues = new Map();
 
-  constructor(path, { defaultWorkspace = defaultImWorkspace(), ungroupedWorkspace } = {}) {
+  constructor(path, { defaultWorkspace = defaultImWorkspace(), ungroupedWorkspace, groupByAgentPreset = false } = {}) {
     if (typeof path !== 'string' || !path) throw new TypeError('workspace store path is required');
     this.#path = path;
     this.#defaultWorkspace = resolve(defaultWorkspace);
     this.#ungroupedWorkspace = ungroupedWorkspace;
+    this.#groupByAgentPreset = groupByAgentPreset === true;
   }
 
   async load() {
@@ -717,6 +720,10 @@ export class BotWorkspaceStore {
     return this.#conversationGenerations.get(
       conversationWorkspaceGenerationKey(botId, conversationKey),
     ) ?? null;
+  }
+
+  groupsByAgentPreset(botId) {
+    return this.#groupByAgentPreset && !this.conversationDirectoryFor(botId).enabled;
   }
 
   agentPresetFor(botId) {
@@ -2025,6 +2032,10 @@ export function createBotWorkspaceScope(
               throw unavailableAgentPreset();
             }
           }
+          if (workspaces.groupsByAgentPreset?.(botId)) {
+            await ensurePresetWorkspace(target, workspaces.workspaceFor(botId), agentPreset, catalog, options);
+            assertCurrentBotScope(isCurrentScope);
+          }
           await workspaces.setAgentPreset(botId, agentPreset, { incarnation });
           assertCurrentBotScope(isCurrentScope);
           if (catalog) {
@@ -2304,7 +2315,13 @@ export function createBotWorkspaceScope(
             : null;
           const agentPreset = workspaces.agentPresetFor(botId);
           const model = inheritBotModel === false ? null : workspaces.modelFor(botId);
-          const workspace = workspaces.conversationWorkspaceFor(botId, conversationKey);
+          let workspace = workspaces.conversationWorkspaceFor(botId, conversationKey);
+          if (agentPreset && workspaces.groupsByAgentPreset?.(botId)
+            && !workspaces.hasConversationWorkspaceOverride(botId, conversationKey)) {
+            const settings = await presetSettings();
+            workspace = await ensurePresetWorkspace(target, workspace, agentPreset, settings.agentPresetCatalog, options);
+            assertCurrentBotScope(isCurrentScope);
+          }
           const sessionId = await target.createSession({
             ...createOptions,
             workspace,
@@ -2551,6 +2568,7 @@ export function createBotScopedHarness(harness, options) {
 
 export function createWorkspaceAwareController(controller, {
   workspaces,
+  harness,
   stateFor,
   agentPresetCatalog,
   modelCatalog,
@@ -2610,6 +2628,9 @@ export function createWorkspaceAwareController(controller, {
       if (normalizedAgentPreset && agentPresetCatalog
         && !catalog?.items.some((item) => item.id === normalizedAgentPreset)) {
         throw unavailableAgentPreset();
+      }
+      if (workspaces.groupsByAgentPreset?.(botId)) {
+        await ensurePresetWorkspace(harness, workspaces.workspaceFor(botId), normalizedAgentPreset, catalog);
       }
       await workspaces.setAgentPreset(botId, normalizedAgentPreset, { incarnation });
       return decorateResult(

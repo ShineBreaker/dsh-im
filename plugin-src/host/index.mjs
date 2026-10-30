@@ -36,7 +36,11 @@ export const inject = [
 ];
 
 function channelConfig(config, name, deliveryService) {
-  const channel = { ...(config.dshHome ? { dshHome: config.dshHome } : {}), ...config[name] };
+  const channel = {
+    ...(config.dshHome ? { dshHome: config.dshHome } : {}),
+    ...(config.groupByAgentPreset === undefined ? {} : { groupByAgentPreset: config.groupByAgentPreset }),
+    ...config[name],
+  };
   const withAuthority = config.rpcAuthority === undefined
     ? channel
     : { ...channel, rpcAuthority: config.rpcAuthority };
