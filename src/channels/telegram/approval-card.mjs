@@ -333,9 +333,8 @@ export class TelegramApprovalCard {
     const outcome = OUTCOME_BY_DECISION[parsed.action];
     let submitted = APPROVAL_SUBMIT_RESULT.RETRYABLE;
     try {
-      // `detailed` separates three endings a boolean cannot express: the
-      // decision landed, the approval is still pending (press again), or this
-      // card can never decide anything (retire its keyboard).
+      // `detailed` distinguishes a landed decision, an in-flight decision,
+      // a retryable failure and an invalid card that must be retired.
       submitted = await submit(live.payload?.approvalId, outcome, { actor: senderId, detailed: true });
     } catch (error) {
       this.#logger.warn?.(
@@ -345,12 +344,13 @@ export class TelegramApprovalCard {
       submitted = APPROVAL_SUBMIT_RESULT.RETRYABLE;
     }
     if (submitted === APPROVAL_SUBMIT_RESULT.SUBMITTED) return true;
-    if (submitted === APPROVAL_SUBMIT_RESULT.RETRYABLE) {
-      // The approval is still pending: hand the keyboard back so the user can
-      // press again. Leaving the card `claimed` would answer every later press
-      // with "正在提交" and the only recovery would be typing the decision.
-      // The queue has already sent the "submission failed, reply again" text, so
-      // this press needs no second toast (Telegram rejects a second answer).
+    if (submitted === APPROVAL_SUBMIT_RESULT.RETRYABLE
+      || submitted === APPROVAL_SUBMIT_RESULT.BUSY) {
+      // Keep the keyboard available after a failure or while a typed decision
+      // is in flight. The queue blocks duplicate submissions; its resolution
+      // hook retires the card on success. A later RPC failure can then be retried
+      // with this same button instead of leaving it claimed or permanently stale.
+      // The callback is already acknowledged; no second toast is needed.
       this.#registry.releaseClaim(parsed.nonce);
       return true;
     }

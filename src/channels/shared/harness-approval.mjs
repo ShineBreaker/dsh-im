@@ -29,7 +29,7 @@ const MAX_RESOLVED_ROUTES = 2_048;
 
 /**
  * How a card-driven decision ended, so a channel card can tell "the decision is
- * in" from "try the button again" from "this card can never work again".
+ * in" from "still submitting", "try again" and "this card can never work again".
  *
  * A transient Host/RPC failure keeps the approval pending, which makes the
  * press retryable: the card must hand its keyboard back instead of staying
@@ -38,6 +38,8 @@ const MAX_RESOLVED_ROUTES = 2_048;
 export const APPROVAL_SUBMIT_RESULT = Object.freeze({
   /** The Host accepted the decision; the approval is gone from the queue. */
   SUBMITTED: 'submitted',
+  /** Another decision is in flight; keep the card until its outcome is known. */
+  BUSY: 'busy',
   /** Nothing was decided and the approval is still pending: press again. */
   RETRYABLE: 'retryable',
   /** The approval is no longer decidable here (resolved, expired, closed). */
@@ -428,13 +430,14 @@ export class HarnessApprovalQueue {
    *
    * Pass `{ detailed: true }` to get an {@link APPROVAL_SUBMIT_RESULT} instead of
    * a boolean: an interactive card has to tell a retryable submission failure
-   * apart from a decision that landed and from a card that can never work again.
+   * apart from an in-flight decision, one that landed, or an invalid card.
    */
   async submitByApprovalId(approvalId, outcome, { actor, detailed = false } = {}) {
     const pending = this.#byId.get(cleanText(approvalId));
     const gone = detailed ? APPROVAL_SUBMIT_RESULT.GONE : false;
-    if (!pending || pending.inactive || pending.resolving || pending.submitting) return gone;
+    if (!pending || pending.inactive || pending.resolving) return gone;
     if (actor !== undefined && pending.actor !== actor) return gone;
+    if (pending.submitting) return detailed ? APPROVAL_SUBMIT_RESULT.BUSY : false;
     const result = await this.#submit(pending, outcome);
     if (!detailed) return true;
     return result ?? APPROVAL_SUBMIT_RESULT.RETRYABLE;

@@ -166,6 +166,7 @@ function bridgeFixture({
   resolveBeforeCardSend = false,
   // Make the first N host submissions fail with a transient RPC error.
   submitFailures = 0,
+  firstSubmitBarrier = null,
 } = {}) {
   const { state } = stateFixture();
   const controller = new AbortController();
@@ -227,6 +228,7 @@ function bridgeFixture({
         ...(argumentsText === undefined ? {} : { argumentsText }),
         respond: async (result) => {
           submitAttempts += 1;
+          if (submitAttempts === 1 && firstSubmitBarrier) await firstSubmitBarrier;
           if (submitFailuresLeft > 0) {
             submitFailuresLeft -= 1;
             env.events.push('submit-failed');
@@ -773,6 +775,55 @@ test('a retryable submit failure hands the keyboard back so the button works aga
 
   await stopFixture(controller, processing);
 });
+
+for (const submitFailures of [0, 1]) {
+  test(`a button pressed during a typed decision preserves the card after ${submitFailures ? 'RPC failure' : 'success'}`, async () => {
+    const firstSubmit = deferred();
+    const { bridge, controller, env, submitAttempts } = bridgeFixture({
+      submitFailures,
+      firstSubmitBarrier: firstSubmit.promise,
+    });
+    const processing = bridge.accept(message('m-1', '启动审批'));
+    let typed;
+    try {
+      await eventually(() => env.cards.length === 1);
+      const data = pressData(env.cards, 0);
+      typed = bridge.accept(message('m-2', '批准'));
+      await eventually(() => submitAttempts() === 1);
+
+      for (const callbackQueryId of ['cb-busy-1', 'cb-busy-2']) {
+        await bridge.acceptCallback(callback({ data, callbackQueryId }));
+      }
+      assert.equal(submitAttempts(), 1, 'concurrent taps must not submit a second decision');
+      assert.equal(env.edits.length, 0, 'an in-flight decision must not retire the keyboard');
+
+      firstSubmit.resolve();
+      await typed;
+      if (submitFailures) {
+        assert.ok(env.sent.some((text) => /审批提交失败/u.test(text)));
+        assert.equal(env.edits.length, 0, 'a failed RPC must leave the keyboard available');
+        await bridge.acceptCallback(callback({ data, senderId: 'actor-b', callbackQueryId: 'cb-stranger' }));
+        assert.equal(submitAttempts(), 1, 'only the owner can retry the decision');
+        assert.match(env.notices.at(-1).text, /只有发起/u);
+        await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-retry' }));
+      }
+      await eventually(() => env.edits.length === 1);
+      assert.equal(submitAttempts(), submitFailures + 1);
+      assert.equal(env.submissions.length, 1);
+      assert.equal(env.submissions[0].value.outcome, 'allowed-once');
+      assert.match(env.edits[0].text, /✅ 已批准（仅本次）/u);
+      assert.deepEqual(env.edits[0].markup, { inline_keyboard: [] });
+
+      await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-after-resolution' }));
+      assert.equal(submitAttempts(), submitFailures + 1, 'a resolved card cannot submit again');
+      assert.match(env.notices.at(-1).text, /已处理/u);
+    } finally {
+      firstSubmit.resolve();
+      await typed;
+      await stopFixture(controller, processing);
+    }
+  });
+}
 
 test('a retryable failure leaves a stranger unable to decide on the owner', async () => {
   const { bridge, controller, env, submitAttempts } = bridgeFixture({ submitFailures: 1 });

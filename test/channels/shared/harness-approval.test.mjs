@@ -50,6 +50,36 @@ test('a failed resolved callback preserves the receipt, FIFO order and duplicate
   assert.deepEqual(entries.at(-1), { id: 'second', text: '已拒绝此次操作。' });
 });
 
+test('an in-flight approval reports busy without changing the legacy boolean result', async () => {
+  const started = deferred();
+  const release = deferred();
+  const queue = new HarnessApprovalQueue();
+  let submissions = 0;
+  await queue.handleRequested(interaction({
+    id: 'busy',
+    toolName: 'bash',
+    respond: async () => {
+      submissions += 1;
+      started.resolve();
+      await release.promise;
+    },
+  }), { key: 'direct:actor-a', actor: 'actor-a', send: async () => {} });
+  const submitting = queue.submitByApprovalId('busy', 'allowed-once', { actor: 'actor-a', detailed: true });
+  await started.promise;
+  try {
+    assert.equal(await queue.submitByApprovalId('busy', 'rejected', { actor: 'actor-a' }), false);
+    assert.equal(await queue.submitByApprovalId('busy', 'rejected', { actor: 'actor-a', detailed: true }), 'busy');
+    assert.equal(await queue.submitByApprovalId('busy', 'rejected', { actor: 'other', detailed: true }), 'gone');
+    assert.equal(submissions, 1);
+    assert.equal(queue.hasPending('direct:actor-a'), true);
+  } finally {
+    release.resolve();
+    await submitting;
+  }
+  assert.equal(await submitting, 'submitted');
+  assert.equal(await queue.submitByApprovalId('busy', 'rejected', { actor: 'actor-a', detailed: true }), 'gone');
+});
+
 function interaction({
   id,
   toolName,
