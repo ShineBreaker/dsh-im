@@ -2418,9 +2418,21 @@ export function createBotWorkspaceScope(
                 return invokeStartedSessionMutation('renameSession', args, 'title rename');
               },
             } : {}),
-            selectModel(...args) {
-              if (dsBotId) throw deliveryTargetError('ds-bot-bound', '请在 DS Bot 中修改模型。');
-              return invokeCurrentSession('selectSessionModel', args, 'model selection');
+            async selectModel(selection, options = {}) {
+              if (!dsBotId) {
+                return invokeCurrentSession('selectSessionModel', [selection, options], 'model selection');
+              }
+              if (!isCurrentSession()) throw workspaceSessionStale('DS Bot binding changed before model selection.');
+              const bot = await dsBot?.resolve(dsBotId);
+              if (!bot || bot.sessionId !== sessionId || !isCurrentSession()) {
+                throw workspaceSessionStale('DS Bot changed before model selection.');
+              }
+              if (typeof dsBot.updateBotModel !== 'function') {
+                throw deliveryTargetError('ds-bot-unavailable', 'DS Bot model selection is unavailable.');
+              }
+              // This is a Bot-wide setting. Never mutate only the IM session: DS
+              // Bot applies the choice to its own and group sessions as well.
+              return dsBot.updateBotModel(dsBotId, selection, options);
             },
             isRunning(...args) {
               return invokeCurrentSession('isSessionRunning', args, 'run-state check');

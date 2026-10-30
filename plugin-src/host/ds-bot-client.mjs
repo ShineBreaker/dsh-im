@@ -76,6 +76,29 @@ export function createDsBotClient(ctx) {
     answerQuestion(sessionId, questionId, answer) {
       return call('answer-question', { sessionId, questionId, answer });
     },
+    async updateBotModel(id, selection) {
+      if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)
+        || typeof selection?.provider !== 'string' || !selection.provider
+        || typeof selection?.model !== 'string' || !selection.model
+        || (selection.reasoningEffort !== undefined
+          && (typeof selection.reasoningEffort !== 'string' || !selection.reasoningEffort))) {
+        throw dsBotError('model-unavailable');
+      }
+      // DS Bot owns both its persisted model and all of its sessions. A model
+      // change without an explicit effort resets to that model's default.
+      const ref = `${selection.provider}/${selection.model}`;
+      const updated = await call('update-bot', {
+        id, model: ref, effort: selection.reasoningEffort ?? null,
+      });
+      if (updated?.id !== id || updated?.model !== ref || updated?.appliedModel !== ref) {
+        throw dsBotError('model-selection-mismatch');
+      }
+      return { selected: {
+        provider: selection.provider,
+        model: selection.model,
+        ...(updated.appliedEffort ? { reasoningEffort: updated.appliedEffort } : {}),
+      } };
+    },
     async resolve(id) {
       const result = await status();
       if (result.state !== 'ready') throw dsBotError();
