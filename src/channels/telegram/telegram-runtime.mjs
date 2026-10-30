@@ -321,6 +321,7 @@ export function normalizeTelegramCallback(update, { botId } = {}) {
       senderName: [callback.from?.first_name, callback.from?.last_name]
         .filter((value) => typeof value === 'string' && value.trim())
         .map((value) => value.trim()).join(' ') || callback.from?.username,
+      senderUsername: callback.from?.username,
       conversationTitle: direct ? undefined : message.chat?.title,
       chatId: String(chatId),
       threadId: messageThreadId === undefined ? undefined : String(messageThreadId),
@@ -446,6 +447,7 @@ export function normalizeTelegramUpdate(update, {
       senderName: [message.from?.first_name, message.from?.last_name]
         .filter((value) => typeof value === 'string' && value.trim())
         .map((value) => value.trim()).join(' ') || message.from?.username,
+      senderUsername: message.from?.username,
       conversationTitle: direct ? undefined : message.chat?.title,
       chatId: String(chatId),
       threadId: messageThreadId === undefined ? undefined : String(messageThreadId),

@@ -1241,9 +1241,12 @@ export class TextHarnessBridge {
       if (message.kind === 'group') content = prependSpeakerLabel(content, message.speakerName);
       const snapshot = this.#acceptedMessageIds.get(messageId);
       let contextEnhanced = false;
+      // contextSource() is enhancement-only: it is read here, under an enabled
+      // snapshot, and nowhere else. The author record below reuses this read.
+      let contextSource = null;
       if (snapshot) {
         const originalContent = content ?? text;
-        const contextSource = message.contextSource?.();
+        contextSource = message.contextSource?.() ?? null;
         content = enhanceContextContent(originalContent, snapshot, () => ({
           channel: this.#descriptor.key,
           senderId,
@@ -1303,6 +1306,22 @@ export class TextHarnessBridge {
       // opened: the auto-steer lane keys its authorship decision off this
       // record, and the finally below retires it when the turn settles.
       this.#turnAuthors.set(conversationKey, { senderId, steered: 0, turnMessageId: messageId });
+      // Persist who spoke here last, so a later describeConversation() can name
+      // the sender of a group turn without replaying any message text. Channels
+      // that own a different state store simply skip it.
+      // The sender id and bot flag are always kept. A display name is kept only
+      // when the channel already exposes it (Matrix speakerName) or context
+      // enhancement read it above; a disabled enhancement never leaks names.
+      try {
+        await this.#state.rememberAuthor?.(conversationKey, {
+          senderId,
+          senderName: message.senderName ?? message.speakerName ?? contextSource?.senderName,
+          senderUsername: message.senderUsername ?? contextSource?.senderUsername,
+          isBot: message.senderIsBot === true,
+        });
+      } catch (error) {
+        this.#logger.warn?.(`[dsh-im:${this.#descriptor.key}] unable to remember the conversation author:`, error?.message ?? error);
+      }
       // The prompt is about to enter the Harness inbox, which is itself durable.
       // Marking the entry submitted first means a crash after this point reports
       // the message instead of replaying a turn the Harness may already own.
