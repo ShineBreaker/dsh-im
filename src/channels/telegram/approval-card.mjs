@@ -5,7 +5,7 @@ import {
   actionCardStateText,
   createCallbackNamespace,
 } from '../shared/action-card.mjs';
-import { harnessApprovalText } from '../shared/harness-approval.mjs';
+import { harnessApprovalText, APPROVAL_SUBMIT_RESULT } from '../shared/harness-approval.mjs';
 
 /**
  * Telegram approval buttons on top of the shared HarnessApprovalQueue `render`
@@ -172,6 +172,13 @@ export class TelegramApprovalCard {
     }
     const rawSend = typeof send === 'function' ? send : async () => {};
     let card = null;
+    // Nonce of the card being rendered, known before its message id is.
+    let cardNonce = null;
+    // A decision can land while `sendInteractionCard` is still in flight: the
+    // buttons are visible but `card` (and therefore the message id) is not set
+    // yet. Store the outcome so the terminal state is applied the moment the id
+    // arrives instead of silently leaving a live keyboard behind.
+    let pendingResolution = null;
     // The queue sends the terminal receipt as a separate text right after
     // `onResolved`; when the card edit already delivered it, that copy is noise.
     let swallowResolvedText = null;
@@ -182,6 +189,28 @@ export class TelegramApprovalCard {
         return;
       }
       return rawSend(text);
+    };
+
+    /**
+     * Replace the card body with the receipt and clear its keyboard.
+     * Returns true only when the chat already shows the receipt.
+     */
+    const applyTerminalState = async (settledCard, resolvedText, outcome) => {
+      if (settledCard.messageId === null) return false;
+      try {
+        await bot.editInteractionCard(target, settledCard.messageId, {
+          text: terminalCardText(settledCard.text, outcome, resolvedText),
+          markup: EMPTY_KEYBOARD,
+        });
+        return true;
+      } catch (error) {
+        this.#logger.warn?.(
+          '[dsh-im:telegram] could not update a resolved approval card; the text receipt follows:',
+          error?.message ?? error,
+        );
+        await this.#retireKeyboard(bot, target, settledCard.messageId);
+        return false;
+      }
     };
 
     return {
@@ -204,6 +233,7 @@ export class TelegramApprovalCard {
           kind: 'approval',
           payload: { approvalId: pending.approvalId, actor },
         });
+        cardNonce = entry.nonce;
         try {
           const sent = await bot.sendInteractionCard(target, {
             text,
@@ -217,11 +247,19 @@ export class TelegramApprovalCard {
           };
           // The card now owns the decision guidance and the terminal receipt.
           pending.interactiveCard = true;
+          // A decision raced the send: finish the terminal edit that
+          // `onResolved` could not do while the message id was unknown.
+          if (pendingResolution) {
+            const { resolvedText, outcome } = pendingResolution;
+            pendingResolution = null;
+            await applyTerminalState(card, resolvedText, outcome);
+          }
         } catch (error) {
           // A platform that refuses the keyboard must not lose the approval:
           // clear the registration and send the exact pre-card prompt instead.
           this.#registry.settle(entry.nonce, ACTION_CARD_STATUS.REVOKED);
           card = null;
+          pendingResolution = null;
           this.#logger.warn?.(
             '[dsh-im:telegram] could not deliver an approval card; falling back to the plain-text approval:',
             error?.message ?? error,
@@ -230,29 +268,26 @@ export class TelegramApprovalCard {
         }
       },
       onResolved: async (resolvedText, outcome) => {
-        if (!card) return false;
+        const nonce = card?.nonce ?? cardNonce;
+        if (!nonce) return false;
+        // Settle first: a press arriving while the edit is in flight must be
+        // refused instead of submitting the same decision twice.
         this.#registry.settle(
-          card.nonce,
+          nonce,
           TERMINAL_STATUS_BY_OUTCOME[outcome] ?? ACTION_CARD_STATUS.RESOLVED,
         );
-        if (card.messageId === null) return false;
-        try {
-          await bot.editInteractionCard(target, card.messageId, {
-            text: terminalCardText(card.text, outcome, resolvedText),
-            markup: EMPTY_KEYBOARD,
-          });
-          // The edit landed (or the client already shows it): tell the queue the
-          // receipt is delivered so it skips the duplicate terminal text.
-          swallowResolvedText = resolvedText;
-          return true;
-        } catch (error) {
-          this.#logger.warn?.(
-            '[dsh-im:telegram] could not update a resolved approval card; the text receipt follows:',
-            error?.message ?? error,
-          );
-          await this.#retireKeyboard(bot, target, card.messageId);
+        if (!card) {
+          // The send response is still pending. Let the queue deliver the text
+          // receipt now — the decision must never be lost — and remember the
+          // outcome so `render` clears the buttons once the id is known.
+          pendingResolution = { resolvedText, outcome };
           return false;
         }
+        const delivered = await applyTerminalState(card, resolvedText, outcome);
+        // The edit landed (or the client already shows it): tell the queue the
+        // receipt is delivered so it skips the duplicate terminal text.
+        if (delivered) swallowResolvedText = resolvedText;
+        return delivered;
       },
     };
   }
@@ -296,16 +331,29 @@ export class TelegramApprovalCard {
       return true;
     }
     const outcome = OUTCOME_BY_DECISION[parsed.action];
-    let submitted = false;
+    let submitted = APPROVAL_SUBMIT_RESULT.RETRYABLE;
     try {
-      submitted = await submit(live.payload?.approvalId, outcome, { actor: senderId });
+      // `detailed` separates three endings a boolean cannot express: the
+      // decision landed, the approval is still pending (press again), or this
+      // card can never decide anything (retire its keyboard).
+      submitted = await submit(live.payload?.approvalId, outcome, { actor: senderId, detailed: true });
     } catch (error) {
       this.#logger.warn?.(
         '[dsh-im:telegram] failed to submit an approval card decision:',
         error?.message ?? error,
       );
+      submitted = APPROVAL_SUBMIT_RESULT.RETRYABLE;
     }
-    if (submitted) return true;
+    if (submitted === APPROVAL_SUBMIT_RESULT.SUBMITTED) return true;
+    if (submitted === APPROVAL_SUBMIT_RESULT.RETRYABLE) {
+      // The approval is still pending: hand the keyboard back so the user can
+      // press again. Leaving the card `claimed` would answer every later press
+      // with "正在提交" and the only recovery would be typing the decision.
+      // The queue has already sent the "submission failed, reply again" text, so
+      // this press needs no second toast (Telegram rejects a second answer).
+      this.#registry.releaseClaim(parsed.nonce);
+      return true;
+    }
     // The live queue no longer has this approval (resolved elsewhere, route
     // closed). Retire the card instead of leaving a keyboard that keeps failing.
     this.#registry.settle(parsed.nonce, ACTION_CARD_STATUS.STALE);

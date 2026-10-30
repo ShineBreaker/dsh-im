@@ -27,6 +27,23 @@ const EXPIRY_RETRY_MAX_MS = 5 * 60_000;
 const RESOLVED_ROUTE_TTL_MS = 5 * 60_000;
 const MAX_RESOLVED_ROUTES = 2_048;
 
+/**
+ * How a card-driven decision ended, so a channel card can tell "the decision is
+ * in" from "try the button again" from "this card can never work again".
+ *
+ * A transient Host/RPC failure keeps the approval pending, which makes the
+ * press retryable: the card must hand its keyboard back instead of staying
+ * `claimed` forever behind a "still submitting" toast.
+ */
+export const APPROVAL_SUBMIT_RESULT = Object.freeze({
+  /** The Host accepted the decision; the approval is gone from the queue. */
+  SUBMITTED: 'submitted',
+  /** Nothing was decided and the approval is still pending: press again. */
+  RETRYABLE: 'retryable',
+  /** The approval is no longer decidable here (resolved, expired, closed). */
+  GONE: 'gone',
+});
+
 function cleanText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -408,13 +425,19 @@ export class HarnessApprovalQueue {
    * (e.g. Feishu approve/reject). Returns false when no matching pending
    * approval is found. Callers may pass the acting user to enforce that only
    * the originating actor can decide.
+   *
+   * Pass `{ detailed: true }` to get an {@link APPROVAL_SUBMIT_RESULT} instead of
+   * a boolean: an interactive card has to tell a retryable submission failure
+   * apart from a decision that landed and from a card that can never work again.
    */
-  async submitByApprovalId(approvalId, outcome, { actor } = {}) {
+  async submitByApprovalId(approvalId, outcome, { actor, detailed = false } = {}) {
     const pending = this.#byId.get(cleanText(approvalId));
-    if (!pending || pending.inactive || pending.resolving || pending.submitting) return false;
-    if (actor !== undefined && pending.actor !== actor) return false;
-    await this.#submit(pending, outcome);
-    return true;
+    const gone = detailed ? APPROVAL_SUBMIT_RESULT.GONE : false;
+    if (!pending || pending.inactive || pending.resolving || pending.submitting) return gone;
+    if (actor !== undefined && pending.actor !== actor) return gone;
+    const result = await this.#submit(pending, outcome);
+    if (!detailed) return true;
+    return result ?? APPROVAL_SUBMIT_RESULT.RETRYABLE;
   }
 
   async handleResolved(resolution) {
@@ -595,18 +618,19 @@ export class HarnessApprovalQueue {
         await this.#transition(next, async () => {
           await this.#notifyResolved(pending, 'resolved', send);
         });
-        return;
+        return APPROVAL_SUBMIT_RESULT.GONE;
       }
-      if (pending.inactive) return;
+      if (pending.inactive) return APPROVAL_SUBMIT_RESULT.GONE;
       pending.submitting = false;
       this.#logger.error?.(`[dsh-im:${this.#label}] failed to submit an approval:`, error);
       // The deadline passed while this decision was in flight.
       if (pending.expired) {
         await this.#expire(pending);
-        return;
+        return APPROVAL_SUBMIT_RESULT.GONE;
       }
       await pending.send(t('审批提交失败，请重新回复「批准」或「拒绝」。')).catch(() => undefined);
-      return;
+      // The approval is still pending: the caller may offer the press again.
+      return APPROVAL_SUBMIT_RESULT.RETRYABLE;
     }
 
     const send = pending.send;
@@ -614,6 +638,7 @@ export class HarnessApprovalQueue {
     await this.#transition(next, async () => {
       await this.#notifyResolved(pending, outcome, send);
     });
+    return APPROVAL_SUBMIT_RESULT.SUBMITTED;
   }
 
   async #notifyResolved(pending, outcome, send = pending.send) {

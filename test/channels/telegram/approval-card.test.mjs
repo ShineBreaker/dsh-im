@@ -161,6 +161,11 @@ function bridgeFixture({
   approvalTimeoutMs,
   argumentsText,
   harness,
+  // Submit the decision before `sendInteractionCard` resolves (the buttons are
+  // already on screen, the message id is not known yet).
+  resolveBeforeCardSend = false,
+  // Make the first N host submissions fail with a transient RPC error.
+  submitFailures = 0,
 } = {}) {
   const { state } = stateFixture();
   const controller = new AbortController();
@@ -173,6 +178,12 @@ function bridgeFixture({
     events: [],
     submissions: [],
   };
+  // Resolves once the first card body reached Telegram, so a test can land a
+  // decision while the send response is still in flight.
+  const cardDelivered = deferred();
+  const releaseCardSend = deferred();
+  let submitAttempts = 0;
+  let submitFailuresLeft = submitFailures;
   const bot = {
     async sendText(_target, text) {
       env.sent.push(text);
@@ -193,6 +204,9 @@ function bridgeFixture({
       env.cardAttempts += 1;
       if (cardResult === 'fail') throw new Error('telegram refused the keyboard');
       env.cards.push({ text, markup });
+      cardDelivered.resolve();
+      // Hold the response open so the press below beats the message id.
+      if (resolveBeforeCardSend) await releaseCardSend.promise;
       return { providerMessageIds: [String(699 + env.cards.length)] };
     };
     bot.editInteractionCard = async (_target, messageId, { text, markup } = {}) => {
@@ -212,6 +226,12 @@ function bridgeFixture({
         sessionId,
         ...(argumentsText === undefined ? {} : { argumentsText }),
         respond: async (result) => {
+          submitAttempts += 1;
+          if (submitFailuresLeft > 0) {
+            submitFailuresLeft -= 1;
+            env.events.push('submit-failed');
+            throw Object.assign(new Error('harness rpc unavailable'), { status: 503 });
+          }
           env.events.push('submit');
           env.submissions.push(result);
           answered.resolve();
@@ -238,7 +258,14 @@ function bridgeFixture({
     logger: { warn() {}, error() {} },
     ...(approvalTimeoutMs === undefined ? {} : { approvalTimeoutMs }),
   });
-  return { bridge, controller, env };
+  return {
+    bridge,
+    controller,
+    env,
+    cardDelivered: cardDelivered.promise,
+    releaseCardSend: () => releaseCardSend.resolve(),
+    submitAttempts: () => submitAttempts,
+  };
 }
 
 function stopFixture(controller, processing) {
@@ -720,4 +747,96 @@ test('approval card labels follow the host language', async () => {
   } finally {
     setImHostLanguage('zh');
   }
+});
+
+// Regression (review of #430): a transient submit failure kept the approval
+// pending, but the card stayed `claimed`, so every later press only answered
+// "正在提交审批决定，请稍候" and the buttons could never retry.
+test('a retryable submit failure hands the keyboard back so the button works again', async () => {
+  const { bridge, controller, env, submitAttempts } = bridgeFixture({ submitFailures: 1 });
+  const processing = bridge.accept(message('m-1', '启动审批'));
+  await eventually(() => env.cards.length === 1);
+  const data = pressData(env.cards, 0);
+
+  await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-first' }));
+  await eventually(() => submitAttempts() === 1);
+  await eventually(() => env.sent.some((text) => /审批提交失败/u.test(text)));
+  assert.equal(env.edits.length, 0, 'a failed submission must not claim the decision landed');
+
+  // The very same button must still decide the still-pending approval.
+  await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-second' }));
+  await eventually(() => env.submissions.length === 1);
+  assert.equal(env.submissions[0].value.outcome, 'allowed-once');
+  assert.equal(submitAttempts(), 2, 'the retry actually reached the Host');
+  await eventually(() => env.edits.length === 1);
+  assert.match(env.edits[0].text, /✅ 已批准（仅本次）/u);
+
+  await stopFixture(controller, processing);
+});
+
+test('a retryable failure leaves a stranger unable to decide on the owner', async () => {
+  const { bridge, controller, env, submitAttempts } = bridgeFixture({ submitFailures: 1 });
+  const processing = bridge.accept(message('m-1', '启动审批'));
+  await eventually(() => env.cards.length === 1);
+  const data = pressData(env.cards, 0);
+
+  await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-first' }));
+  await eventually(() => submitAttempts() === 1);
+  await bridge.acceptCallback(callback({
+    data, senderId: 'actor-b', callbackQueryId: 'cb-stranger',
+  }));
+  assert.equal(submitAttempts(), 1, 'a released card is still owner-only');
+  assert.match(env.notices.at(-1).text, /只有发起/u);
+
+  await bridge.acceptCallback(callback({ data, callbackQueryId: 'cb-owner' }));
+  await eventually(() => env.submissions.length === 1);
+
+  await stopFixture(controller, processing);
+});
+
+// Regression (review of #430): the decision could land before
+// `sendInteractionCard` resolved, so `card` (and its message id) was still null.
+// The old code returned early, the card kept its buttons and stayed claimed.
+test('a decision that beats the send response still updates the card once it lands', async () => {
+  const { bridge, controller, env, cardDelivered, releaseCardSend } = bridgeFixture({
+    resolveBeforeCardSend: true,
+  });
+  const processing = bridge.accept(message('m-1', '启动审批'));
+  // The buttons are already visible even though Telegram has not answered yet.
+  await cardDelivered;
+  assert.equal(env.cards.length, 1);
+
+  await bridge.acceptCallback(callback({ data: pressData(env.cards, 0) }));
+  await eventually(() => env.submissions.length === 1);
+  assert.equal(env.submissions[0].value.outcome, 'allowed-once');
+  assert.equal(env.edits.length, 0, 'nothing to edit before the message id exists');
+
+  releaseCardSend();
+  await eventually(() => env.edits.length === 1);
+  const [edit] = env.edits;
+  assert.equal(edit.messageId, '700');
+  assert.match(edit.text, /✅ 已批准（仅本次）/u);
+  assert.deepEqual(edit.markup, { inline_keyboard: [] }, 'the stale keyboard is cleared');
+
+  await stopFixture(controller, processing);
+});
+
+test('a decision racing the send response never loses its text receipt', async () => {
+  const { bridge, controller, env, cardDelivered, releaseCardSend } = bridgeFixture({
+    resolveBeforeCardSend: true,
+    cardEditResult: 'fail',
+  });
+  const processing = bridge.accept(message('m-1', '启动审批'));
+  await cardDelivered;
+
+  await bridge.acceptCallback(callback({ data: pressData(env.cards, 0) }));
+  await eventually(() => env.submissions.length === 1);
+  await eventually(() => env.sent.includes('已批准，仅对本次操作有效。'));
+
+  releaseCardSend();
+  // The terminal edit fails, so the leftover keyboard is cleared separately.
+  await eventually(() => env.edits.some((entry) => entry.markup
+    && Array.isArray(entry.markup.inline_keyboard) && entry.markup.inline_keyboard.length === 0));
+
+  await stopFixture(controller, processing);
 });

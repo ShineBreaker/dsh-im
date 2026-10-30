@@ -183,3 +183,53 @@ test('every card state has a non-empty unified notice and channels can override 
   );
   assert.equal(actionCardStateText('made-up'), actionCardStateText(ACTION_CARD_STATUS.UNKNOWN));
 });
+
+// A card whose submission failed but whose approval is still pending must give
+// the keyboard back; without this it stays `claimed` and every later press is
+// answered with "still submitting".
+test('a live claim can be released so the same button can decide again', () => {
+  const registry = new ActionCardRegistry({ createNonce: () => 'nonce-one' });
+  registry.issue({
+    conversationKey: 'direct:42',
+    kind: 'approval',
+    payload: { approvalId: 'approval-one', actor: 'actor-a' },
+  });
+  assert.equal(registry.claim('nonce-one').status, ACTION_CARD_STATUS.ACTIVE);
+
+  const released = registry.releaseClaim('nonce-one');
+  assert.equal(released?.status, ACTION_CARD_STATUS.ACTIVE);
+  assert.equal(released?.claimedAt, null);
+  // The button works again and only the first press of the retry wins.
+  assert.equal(registry.claim('nonce-one').status, ACTION_CARD_STATUS.ACTIVE);
+  assert.equal(registry.claim('nonce-one').status, ACTION_CARD_STATUS.CLAIMED);
+});
+
+test('a released claim never revives a dead card', () => {
+  let counter = 0;
+  const registry = new ActionCardRegistry({ createNonce: () => `nonce-${++counter}` });
+  registry.issue({ conversationKey: 'direct:42', payload: { approvalId: 'approval-one' } });
+  registry.claim('nonce-1');
+  registry.settle('nonce-1', ACTION_CARD_STATUS.RESOLVED);
+  assert.equal(registry.releaseClaim('nonce-1'), null, 'a resolved card stays dead');
+  assert.equal(registry.claim('nonce-1').status, ACTION_CARD_STATUS.RESOLVED);
+
+  assert.equal(registry.releaseClaim('nonce-missing'), null);
+  // Never claimed yet: nothing to release, but the card is still pressable.
+  registry.issue({ conversationKey: 'direct:44', payload: { approvalId: 'approval-three' } });
+  const nonce = registry.activeFor('direct:44').nonce;
+  assert.equal(registry.releaseClaim(nonce), null);
+  assert.equal(registry.claim(nonce).status, ACTION_CARD_STATUS.ACTIVE);
+
+  // An expired claim is dead too: the approval timeout already decided it.
+  const clock = fakeClock();
+  const clocked = new ActionCardRegistry({
+    now: clock.now,
+    ttlMs: 20,
+    createNonce: () => 'nonce-ttl',
+  });
+  clocked.issue({ conversationKey: 'direct:45', payload: { approvalId: 'approval-four' } });
+  clocked.claim('nonce-ttl');
+  clock.advance(50);
+  assert.equal(clocked.releaseClaim('nonce-ttl'), null, 'an expired card stays expired');
+  assert.equal(clocked.claim('nonce-ttl').status, ACTION_CARD_STATUS.EXPIRED);
+});

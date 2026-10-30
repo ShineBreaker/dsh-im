@@ -236,6 +236,26 @@ export class ActionCardRegistry {
   }
 
   /**
+   * Give a claimed card its keyboard back after a submission that failed but is
+   * still retryable (a transient RPC error, a dropped response). Without this a
+   * card stays `claimed` forever and every later press is answered with "still
+   * submitting", so the only recovery is typing the decision as text.
+   *
+   * Only a live claim can be released: a card already resolved, expired or
+   * superseded must stay dead, otherwise a stale tap could decide a newer
+   * approval. Returns the released entry, or null when nothing was released.
+   */
+  releaseClaim(nonce) {
+    const entry = this.#lookup(nonce);
+    if (!entry) return null;
+    this.#expireIfNeeded(entry);
+    if (entry.status !== ACTION_CARD_STATUS.CLAIMED) return null;
+    entry.status = ACTION_CARD_STATUS.ACTIVE;
+    entry.claimedAt = null;
+    return entry;
+  }
+
+  /**
    * Move a live card to a terminal state. Returns false when there is nothing
    * left to settle (unknown, expired, or already settled).
    */
