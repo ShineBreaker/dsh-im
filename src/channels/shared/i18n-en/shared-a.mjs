@@ -109,6 +109,14 @@ export default {
     'Reply delivery could not be confirmed. Check whether it already arrived before submitting the task again.',
   '回复已经生成，但当前渠道暂时无法发送。请稍后重试。':
     'The reply was generated, but this channel could not send it. Please try again later.',
+  '当前会话已绑定 DS Bot，无法开启新会话或切换工作目录。请先在「绑定 DS Bot」中解除绑定后再试。':
+    'This conversation is bound to a DS Bot, so a new Session cannot be started and the Workspace cannot be switched. Unbind it in "Bind DS Bot" first, then try again.',
+  '当前会话已绑定 DS Bot，无法开启新会话。请先在「绑定 DS Bot」中解除绑定后再试。':
+    'This conversation is bound to a DS Bot, so a new Session cannot be started. Unbind it in "Bind DS Bot" first, then try again.',
+  '当前绑定的 DS Bot 暂时不可用。请检查 DS Bot 插件状态，或在「绑定 DS Bot」中重新选择。':
+    'The bound DS Bot is temporarily unavailable. Check the DS Bot plugin status, or select another one in "Bind DS Bot".',
+  '当前绑定的 DS Bot 会话已不可用。请在「绑定 DS Bot」中重新选择。':
+    'The Session of the bound DS Bot is no longer available. Select another one in "Bind DS Bot".',
   '当前消息包含无法处理的图片或文件。请调整后重新发送。':
     'This message contains an image or file that cannot be processed. Adjust it and send it again.',
   '任务未完成，暂时无法确定原因。请重试；若持续发生，请将参考号提供给管理员。':

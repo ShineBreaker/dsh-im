@@ -91,6 +91,40 @@ test('DingTalk maps undocumented repliedMsg runtime fields into a reply snapshot
   });
 });
 
+test('DingTalk explains a DS Bot binding refusal for /new instead of reporting an unknown fault', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:staff-approved', 'session-dsbot');
+  fixture.state.clearSession = async () => {
+    throw Object.assign(new Error('请先在“绑定 DS Bot”中解除绑定，再切换会话或工作目录。'), {
+      code: 'ds-bot-bound',
+    });
+  };
+  const sent = [];
+  const bridge = new DingtalkHarnessBridge({
+    api: {
+      sendText: async (payload) => {
+        sent.push(payload.text);
+        return { messageId: 'ding-dsbot' };
+      },
+    },
+    clientId: 'ding-client',
+    clientSecret: 'host-secret',
+    harness: {
+      ask: async () => assert.fail('/new must not reach the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('dingtalk-new-dsbot', '/new'));
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /绑定 DS Bot/u);
+  assert.match(sent[0], /解除绑定/u);
+  assert.doesNotMatch(sent[0], /INTERNAL_UNKNOWN/u);
+  assert.doesNotMatch(sent[0], /参考号/u);
+  assert.equal(fixture.state.sessionFor('p2p:staff-approved'), 'session-dsbot');
+});
+
 test('DingTalk sends quote context to Harness but does not execute quoted commands', async () => {
   const fixture = stateFixture();
   fixture.sessions.set('p2p:staff-approved', 'session-quote');

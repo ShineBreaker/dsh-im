@@ -23,8 +23,42 @@ test('missing Sessions accept both RPC codes without changing the original error
   }
 });
 
-test('unknown transport failures reuse normalized timeout and network evidence', () => {
-  for (const [error, code, reason] of [
+// A DS Bot binding is a deliberate user setting. The bot refuses to clear or
+// switch a conversation that a DS Bot owns; that refusal must not reach the
+// user as "the cause could not be determined".
+test('DS Bot binding refusals keep their own code and tell the user how to recover', () => {
+  for (const [code, expected] of [
+    ['ds-bot-bound', 'DS_BOT_BOUND'],
+    ['ds-bot-unavailable', 'DS_BOT_UNAVAILABLE'],
+    ['ds-bot-not-found', 'DS_BOT_NOT_FOUND'],
+  ]) {
+    const error = Object.freeze({ code, message: 'private ds bot detail' });
+    const failure = classifyMessageFailure(error, options);
+    assert.equal(failure.code, expected, code);
+    assert.equal(failure.reason, expected, code);
+    assert.match(failure.message, /绑定 DS Bot/u);
+    assert.doesNotMatch(JSON.stringify(failure), /private ds bot detail/u);
+    assert.equal(error.code, code);
+  }
+});
+
+test('a DS Bot binding refusal names the action that recovers it', () => {
+  const failure = classifyMessageFailure({ code: 'ds-bot-bound' }, options);
+  assert.match(failure.message, /无法开启新会话/u);
+  assert.match(failure.message, /解除绑定/u);
+});
+
+test('English DS Bot binding refusals stay free of Chinese text', (t) => {
+  const language = getImHostLanguage();
+  t.after(() => setImHostLanguage(language));
+  setImHostLanguage('en');
+  const failure = classifyMessageFailure({ code: 'ds-bot-bound' }, options);
+  assert.equal(failure.code, 'DS_BOT_BOUND');
+  assert.match(failure.message, /DS Bot/u);
+  assert.doesNotMatch(failure.message, /[\u4e00-\u9fff]/u);
+});
+
+test('unknown transport failures reuse normalized timeout and network evidence', () => {  for (const [error, code, reason] of [
     [new DOMException('private timeout detail', 'TimeoutError'), 'REQUEST_TIMEOUT', 'timeout'],
     [{ code: 'telegram-timeout' }, 'REQUEST_TIMEOUT', 'timeout'],
     [{ code: 'timeout' }, 'REQUEST_TIMEOUT', 'timeout'],

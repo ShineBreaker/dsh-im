@@ -17,6 +17,7 @@ import {
 import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { newConversationRefusalText } from '../shared/new-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import {
   isControlCommand,
@@ -950,8 +951,14 @@ export class DingtalkHarnessBridge {
       && !['/stop', '/help', '/status', '/history'].includes(command)) {
       result = { message: t('当前任务尚未结束，请先停止任务或等待完成后再操作。') };
     } else if (command === '/new') {
-      await this.#state.clearSession(key);
-      result = { message: t('已开启新会话。请发送你的问题。') };
+      let refusal = null;
+      try {
+        await this.#state.clearSession(key);
+      } catch (error) {
+        refusal = newConversationRefusalText(error);
+        if (!refusal) throw error;
+      }
+      result = { message: refusal ?? t('已开启新会话。请发送你的问题。') };
     } else if (command === '/status') {
       await this.#harness.ensureRunning({ signal: this.#signal });
       result = { message: t('钉钉机器人与 DeepSeek Harness 连接正常。') };
@@ -1336,7 +1343,16 @@ export class DingtalkHarnessBridge {
         return;
       }
       if (isPlainText && !hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
+        try {
+          await this.#state.clearSession(key);
+        } catch (error) {
+          const refusal = newConversationRefusalText(error);
+          if (refusal) {
+            await this.#send(sessionWebhook, refusal, this.#atUsersFor(message));
+            return;
+          }
+          throw error;
+        }
         await this.#send(sessionWebhook, t('已开启新会话。请发送你的问题。'), this.#atUsersFor(message));
         return;
       }

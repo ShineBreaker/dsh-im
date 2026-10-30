@@ -100,6 +100,12 @@ const FAILURE_MESSAGES = Object.freeze({
     '回复发送结果未能确认。请先检查聊天内是否已经收到，不要立即重复提交。',
   CHANNEL_DELIVERY:
     '回复已经生成，但当前渠道暂时无法发送。请稍后重试。',
+  DS_BOT_BOUND:
+    '当前会话已绑定 DS Bot，无法开启新会话或切换工作目录。请先在「绑定 DS Bot」中解除绑定后再试。',
+  DS_BOT_UNAVAILABLE:
+    '当前绑定的 DS Bot 暂时不可用。请检查 DS Bot 插件状态，或在「绑定 DS Bot」中重新选择。',
+  DS_BOT_NOT_FOUND:
+    '当前绑定的 DS Bot 会话已不可用。请在「绑定 DS Bot」中重新选择。',
   INPUT_INVALID:
     '当前消息包含无法处理的图片或文件。请调整后重新发送。',
   REQUEST_TIMEOUT:
@@ -158,6 +164,13 @@ function failureCode(error, details) {
   if (code === 'session-archived') return 'SESSION_ARCHIVED';
   if (code === 'agent-busy') return 'SESSION_BUSY';
   if (code === 'workspace-session-stale') return 'SESSION_STALE';
+  // A DS Bot binding is a deliberate user setting, not an internal fault: the
+  // bot refuses to switch or clear a conversation that is owned by a DS Bot.
+  // Without these entries the refusal fell through to INTERNAL_UNKNOWN and the
+  // user was told the cause was unknown.
+  if (code === 'ds-bot-bound') return 'DS_BOT_BOUND';
+  if (code === 'ds-bot-unavailable') return 'DS_BOT_UNAVAILABLE';
+  if (code === 'ds-bot-not-found') return 'DS_BOT_NOT_FOUND';
   if (code.startsWith('workspace-')) return 'WORKSPACE_UNAVAILABLE';
   if (/^agent-preset[-/]/u.test(code)) return 'PRESET_UNAVAILABLE';
   if (code.startsWith('image-') || code.startsWith('inbound-file-')

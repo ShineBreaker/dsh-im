@@ -199,6 +199,33 @@ test('QQ executes plain /clear through the fast command path and preserves its S
   assert.equal(fixture.state.sessionFor('c2c:owner-openid'), 'session-clear');
 });
 
+test('QQ explains a DS Bot binding refusal for /new instead of reporting an unknown fault', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-dsbot']]);
+  fixture.state.clearSession = async () => {
+    throw Object.assign(new Error('请先在“绑定 DS Bot”中解除绑定，再切换会话或工作目录。'), {
+      code: 'ds-bot-bound',
+    });
+  };
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      ask: async () => assert.fail('/new must not reach the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'qq-new-dsbot', content: '/new' }));
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /绑定 DS Bot/u);
+  assert.match(sent[0], /解除绑定/u);
+  assert.doesNotMatch(sent[0], /INTERNAL_UNKNOWN/u);
+  assert.doesNotMatch(sent[0], /参考号/u);
+  assert.equal(fixture.state.sessionFor('c2c:owner-openid'), 'session-dsbot');
+});
+
 async function committedArtifact(t, fileName, content, suffix) {
   const workspace = await mkdtemp(join(tmpdir(), `dsh-im-qq-artifact-${suffix}-`));
   t.after(() => rm(workspace, { recursive: true, force: true }));

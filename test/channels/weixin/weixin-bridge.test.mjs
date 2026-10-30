@@ -107,6 +107,41 @@ test('Weixin bridge sends ref_msg context to Harness but does not execute quoted
   assert.deepEqual(prompt.at(-1), { type: 'text', text: '这条指令是什么意思？' });
 });
 
+test('Weixin bridge explains a DS Bot binding refusal for /new instead of reporting an unknown fault', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-dsbot');
+  fixture.state.clearSession = async () => {
+    throw Object.assign(new Error('请先在“绑定 DS Bot”中解除绑定，再切换会话或工作目录。'), {
+      code: 'ds-bot-bound',
+    });
+  };
+  const sent = [];
+  const bridge = new WeixinHarnessBridge({
+    api: {
+      sendText: async (payload) => {
+        sent.push(payload.text);
+        return { messageId: 'weixin-dsbot' };
+      },
+    },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      ask: async () => assert.fail('/new must not reach the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message('weixin-new-dsbot', '/new'));
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /绑定 DS Bot/u);
+  assert.match(sent[0], /解除绑定/u);
+  assert.doesNotMatch(sent[0], /INTERNAL_UNKNOWN/u);
+  assert.doesNotMatch(sent[0], /参考号/u);
+  assert.equal(fixture.state.sessionFor('p2p:owner-user'), 'session-dsbot');
+});
+
 test('Weixin bridge restores a metadata-only bot quote from its recent outbound index', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-weixin-quote-index-'));
   const state = await new WeixinStateStore(join(root, 'state.json')).load();

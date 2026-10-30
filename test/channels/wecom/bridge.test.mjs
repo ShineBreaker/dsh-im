@@ -95,6 +95,39 @@ test('Enterprise WeChat native image adapter marks an unacknowledged message as 
   }, { timeoutMs: 20 }), (error) => error.code === 'artifact-delivery-uncertain');
 });
 
+test('Enterprise WeChat explains a DS Bot binding refusal for /new instead of reporting an unknown fault', async () => {
+  const sent = [];
+  const bridge = new WecomHarnessBridge({
+    client: {
+      replyStream: async (_source, _streamId, content, finish) => {
+        sent.push(content);
+        return finish ? { body: { msgid: 'wecom-dsbot' } } : undefined;
+      },
+      replyStreamNonBlocking: async () => {},
+      sendMessage: async () => {},
+    },
+    harness: {
+      ask: async () => assert.fail('/new must not reach the model'),
+    },
+    state: {
+      ...state(),
+      clearSession: async () => {
+        throw Object.assign(new Error('请先在“绑定 DS Bot”中解除绑定，再切换会话或工作目录。'), {
+          code: 'ds-bot-bound',
+        });
+      },
+    },
+  });
+
+  await bridge.accept(frame({ msgid: 'wecom-new-dsbot', text: { content: '/new' } }));
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /绑定 DS Bot/u);
+  assert.match(sent[0], /解除绑定/u);
+  assert.doesNotMatch(sent[0], /INTERNAL_UNKNOWN/u);
+  assert.doesNotMatch(sent[0], /参考号/u);
+});
+
 test('Enterprise WeChat sends an image artifact as a native image message', async (t) => {
   const artifact = await committedArtifact(t, 'native.png', PNG_1X1, 'native-image');
   const uploads = [];

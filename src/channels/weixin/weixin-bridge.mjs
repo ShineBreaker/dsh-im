@@ -23,6 +23,7 @@ import {
 } from '../shared/batch-input.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { newConversationRefusalText } from '../shared/new-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import {
   isControlCommand,
@@ -819,7 +820,17 @@ export class WeixinHarnessBridge {
         return;
       }
       if (!hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
+        try {
+          await this.#state.clearSession(key);
+        } catch (error) {
+          const refusal = newConversationRefusalText(error);
+          if (refusal) {
+            await this.#send(sender, refusal, contextToken, runId);
+            await this.#state.markSeen(messageId);
+            return;
+          }
+          throw error;
+        }
         await this.#send(sender, t('已开启新会话。请发送你的问题。'), contextToken, runId);
         await this.#state.markSeen(messageId);
         return;

@@ -5,6 +5,7 @@ import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../share
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { newConversationRefusalText } from '../shared/new-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import {
   isControlCommand,
@@ -1040,7 +1041,13 @@ export class QqHarnessBridge {
           || locked.sessionId !== choice.context.sessionId) {
           return { message: t('会话或工作区已变化，请重新发送 /m。') };
         }
-        await this.#state.clearSession(key);
+        try {
+          await this.#state.clearSession(key);
+        } catch (error) {
+          const refusal = newConversationRefusalText(error);
+          if (refusal) return { message: refusal };
+          throw error;
+        }
         return { message: t('已开启新会话。请发送你的问题。') };
       });
       if (isClearCommand(command)) return runClearCommand(command, this.#harness, this.#state, key, options);
@@ -1314,7 +1321,17 @@ export class QqHarnessBridge {
         return;
       }
       if (!hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
+        try {
+          await this.#state.clearSession(key);
+        } catch (error) {
+          const refusal = newConversationRefusalText(error);
+          if (refusal) {
+            await this.#bot.sendText(target, refusal);
+            await markMessageSeen();
+            return;
+          }
+          throw error;
+        }
         await this.#bot.sendText(target, t('已开启新会话。请发送你的问题。'));
         await markMessageSeen();
         return;
