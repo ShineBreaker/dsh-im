@@ -75,7 +75,8 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
   const ctx = { marker: 'shared-context' };
   const config = {
     rpcAuthority: 'trusted-host',
-    feishu: { domain: 'feishu' },
+    groupByAgentPreset: true,
+    feishu: { domain: 'feishu', groupByAgentPreset: false },
     weixin: { timeout: 30 },
     dingtalk: { replyTimeoutMs: 60_000 },
     wecom: { replyTimeoutMs: 60_000 },
@@ -97,17 +98,17 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
     'typertGateway',
   ]);
   assert.deepEqual(calls, [
-    ['feishu', ctx, { ...config.feishu, rpcAuthority: 'trusted-host', deliveryService }],
-    ['weixin', ctx, { ...config.weixin, rpcAuthority: 'trusted-host', deliveryService }],
-    ['dingtalk', ctx, { ...config.dingtalk, rpcAuthority: 'trusted-host', deliveryService }],
-    ['wecom', ctx, { ...config.wecom, rpcAuthority: 'trusted-host', deliveryService }],
-    ['qq', ctx, { ...config.qq, rpcAuthority: 'trusted-host', deliveryService }],
-    ['slack', ctx, { ...config.slack, rpcAuthority: 'trusted-host', deliveryService }],
-    ['telegram', ctx, { ...config.telegram, rpcAuthority: 'trusted-host', deliveryService }],
-    ['discord', ctx, { ...config.discord, rpcAuthority: 'trusted-host', deliveryService }],
-    ['whatsapp', ctx, { ...config.whatsapp, rpcAuthority: 'trusted-host', deliveryService }],
-    ['imessage', ctx, { ...config.imessage, rpcAuthority: 'trusted-host', deliveryService }],
-    ['office', ctx, { ...config.office, rpcAuthority: 'trusted-host' }],
+    ['feishu', ctx, { groupByAgentPreset: true, ...config.feishu, rpcAuthority: 'trusted-host', deliveryService }],
+    ['weixin', ctx, { groupByAgentPreset: true, ...config.weixin, rpcAuthority: 'trusted-host', deliveryService }],
+    ['dingtalk', ctx, { groupByAgentPreset: true, ...config.dingtalk, rpcAuthority: 'trusted-host', deliveryService }],
+    ['wecom', ctx, { groupByAgentPreset: true, ...config.wecom, rpcAuthority: 'trusted-host', deliveryService }],
+    ['qq', ctx, { groupByAgentPreset: true, ...config.qq, rpcAuthority: 'trusted-host', deliveryService }],
+    ['slack', ctx, { groupByAgentPreset: true, ...config.slack, rpcAuthority: 'trusted-host', deliveryService }],
+    ['telegram', ctx, { groupByAgentPreset: true, ...config.telegram, rpcAuthority: 'trusted-host', deliveryService }],
+    ['discord', ctx, { groupByAgentPreset: true, ...config.discord, rpcAuthority: 'trusted-host', deliveryService }],
+    ['whatsapp', ctx, { groupByAgentPreset: true, ...config.whatsapp, rpcAuthority: 'trusted-host', deliveryService }],
+    ['imessage', ctx, { groupByAgentPreset: true, ...config.imessage, rpcAuthority: 'trusted-host', deliveryService }],
+    ['office', ctx, { groupByAgentPreset: true, ...config.office, rpcAuthority: 'trusted-host' }],
   ]);
 });
 

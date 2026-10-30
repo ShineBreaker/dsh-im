@@ -355,6 +355,11 @@ DingTalk menus use a shared template built into the plugin; no template setup is
 
 ## Other features
 
+### Group new sessions by Agent Preset
+
+Set `groupByAgentPreset: true` in the plugin Host config to opt in (off by default). A per-channel value overrides the plugin default. An explicit preset creates or reuses a named `presets/<preset-id>` workspace under the default IM directory for new sessions. Existing chats retain their history and location; manual workspaces, conversation overrides and Feishu directory isolation take priority. See [configuration and behavior](docs/preset-workspaces.md).
+
+
 - **Image understanding**: built-in channels with image input support can send JPEG, PNG, WebP, and GIF files sent as images to Harness, with an optional text description. Originals are saved in the workspace (default 30 MB per image, 20 images per message). Model copies are resized or compressed within configurable 5 MB per-image and 20 MB total budgets, with workspace-file fallback when necessary. Configure these limits in General settings → Attachments → Image input. iMessage's MVP supports text DMs only.
 - **Switch workspaces from a bot card**: every bot card on the settings page shows its current Harness workspace. Enter an existing absolute directory path directly or open the directory picker. Switching clears only that bot's old chat mappings; it never deletes, empties, or archives old Sessions. Replies already in progress may finish, while later messages use the new workspace.
 - **Default directory and ungrouped sessions**: bots using the default share `$DSH_HOME/im`, while retaining separate chat-to-Session mappings. The plugin creates no workspace group for this directory. Use `/sessions` to list its ungrouped sessions and `/session <Session ID>` or `/session N` to bind an ordinary session. New sessions in other directories use the existing workspace grouping mechanism; switching back to the default directory creates ungrouped sessions again. Existing bot directories are not migrated automatically.
