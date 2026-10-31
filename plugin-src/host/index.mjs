@@ -37,7 +37,11 @@ export const inject = [
 ];
 
 function channelConfig(config, name, deliveryService) {
-  const channel = { ...(config.dshHome ? { dshHome: config.dshHome } : {}), ...config[name] };
+  const channel = {
+    ...(config.dshHome ? { dshHome: config.dshHome } : {}),
+    ...(config.groupByAgentPreset === undefined ? {} : { groupByAgentPreset: config.groupByAgentPreset }),
+    ...config[name],
+  };
   const withAuthority = config.rpcAuthority === undefined
     ? channel
     : { ...channel, rpcAuthority: config.rpcAuthority };
@@ -98,6 +102,21 @@ export function createImHostPlugin(internals = {}) {
         unavailableSessionSyncChannels: unavailableSessionSyncChannels.map((channel) => channel === 'wecomApp' ? 'wecom-app' : channel),
         dsBot: createDsBotClient(ctx),
       });
+      /** Sessions already reported, so the log stays one line per session. */
+      const describedSessions = new Set();
+      const describeConversationLogged = async (sessionId) => {
+        const described = await deliveryService.describeConversation(sessionId);
+        if (described && !describedSessions.has(sessionId)) {
+          describedSessions.add(sessionId);
+          const log = typeof ctx?.logger === 'function' ? ctx.logger(name) : (ctx?.logger ?? console);
+          try {
+            log?.info?.(`describeConversation session=${sessionId} chat=${described.conversationKey} sender=${described.senderId ?? '-'}`);
+          } catch {
+            // Logging must never break the lookup.
+          }
+        }
+        return described;
+      };
       if (typeof ctx?.provide === 'function') {
         ctx.provide('dshIm', Object.freeze({
           contractVersion: 1,
@@ -106,6 +125,10 @@ export function createImHostPlugin(internals = {}) {
           consumeInbound: (botId, options) => deliveryService.consumeInbound(botId, options),
           historyChecked: (botId, route, query, options) => deliveryService.historyChecked(botId, route, query, options),
           replyChecked: (botId, route, text, options) => deliveryService.replyChecked(botId, route, text, options),
+          describeConversation: (sessionId) => describeConversationLogged(sessionId),
+          // Prompt assembly is synchronous, so a caller that needs the identity
+          // before the first step cannot await the async variant.
+          describeConversationSync: (sessionId) => deliveryService.describeConversationSync(sessionId),
           describeBot: (botId) => deliveryService.describeBot(botId),
           sendChecked: (botId, targetId, text, options) => deliveryService.sendChecked(botId, targetId, text, options),
           send: (botId, targetId, text, options) => (

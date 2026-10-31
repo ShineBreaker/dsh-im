@@ -261,6 +261,51 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 
 支持全局面板的 DSH 在左侧边栏提供「IM机器人」，沿用插件页的双对话框造型，以单色细线图标显示，点击打开完整 IM 管理面板。原「设置 → IM机器人」和插件详情页的「打开 IM机器人」入口保留。宿主也可通过可选客户端服务 `dshImClient` 嵌入面板；接口、兼容要求与接入示例见[客户端接入文档](docs/client-integration.md)。
 
+### 会话 → 对话反查（宿主服务）
+
+其他插件常常只拿得到会话 id，却需要知道这个会话属于哪个渠道、哪个机器人、哪个群和哪个话题。宿主服务 `dshIm` 为此提供一个只读方法：
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null —— 该会话不属于任何 IM 对话
+// 否则：
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- 只读：不访问网络、不创建会话、不阻塞回复，也不抛错；未知会话返回 `null`。
+- 数据全部来自插件自己的状态文件（`sessions` 映射）与机器人配置，不要求内核新增字段。
+- `chatType` 为 `group`、`thread` 或 `dm`；`direct:dm:<id>` 形式的键会把 `<id>` 填进 `senderId`。
+- 每个会话首次反查写一行日志 `[dsh-im] describeConversation session=… chat=… sender=…`，之后不再重复。
+- 发言人会被记住：桥接在把消息交给会话之前，把 `senderId`、显示名、`username` 与「是否机器人」写进机器人状态文件（`authors`），每条新消息覆盖前一条，只保留身份、不保留文本；因此重启后仍然可读。
+- 私聊的 `senderId` 还可以从键 `direct:dm:<id>` 推出，即使作者记录缺失也有值；群聊作者在第一条入站消息之前为 `null`。
+
+同一个反查还有一个同步版本，供在同步上下文里组装的场景使用（例如系统提示词的渲染）：
+
+```js
+const info = dshIm.describeConversationSync(sessionId);
+```
+
+- 没有 `await`：只读本进程已经加载的机器人状态，绝不发起加载、访问网络或启动账户查询。
+- 因此该机器人状态尚未加载时返回 `null` —— 调用方要自己决定「未知」意味着什么；异步版本会在需要时加载并给出 `botName`，同步版本 `botName` 恒为 `null`。
+- 已经处理过消息的机器人，其状态一定在内存里，所以活跃会话的第一次提示词组装就能拿到身份。
+
+### 对话绑定的两个事件
+
+写入绑定时，通道会同步发出事件，订阅方不必反查就能维持自己的「会话 → 身份」表：
+
+| 事件 | 何时发出 | 载荷 |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | 对话绑定到某个会话，且在 `session.create` 之前 | `channel`、`botId`、`sessionId`、`conversationKey`、`chatType`、`chatId`、`threadId`、`senderId`、`senderName` |
+| `dsh-im/session-unbind` | 对话不再指向原会话：切换到另一个会话，或绑定被清除 | 同上，但没有作者字段；`sessionId` 是被解绑的旧会话 |
+
+- 两个事件同步发出，顺序是「先解绑旧的、再绑定新的」，订阅方能一条线读完。
+- 只有真正提交的写入才会发事件：写入被拒绝（返回 `false`）或写成同一个会话时不发 `unbind`。
+- 清除一个会话绑定（`clearSession`）和清除全部绑定（`clearSessions`）同样会按对话逐个发 `session-unbind`。
+- 订阅方抛错不影响消息处理。
+- 解绑不代表会话的身份消失：把它留在自己的表里（例如带 `superseded_at`）仍可让独占该会话的定时任务继续投递到原来的对话，只是「谁拥有这个对话」要按最新一次绑定算。
+
 ### 上下文增强
 
 [查看上下文增强说明](docs/上下文增强.md)
@@ -322,6 +367,11 @@ Web 与机器人可同时处理同一审批，先提交的「批准一次」或�
 [查看命令说明](docs/机器人命令.md)
 
 ## 其它功能
+
+### 按 Agent Preset 自动分组
+
+在插件 Host 配置中设置 `groupByAgentPreset: true`（默认关闭），也可在某个渠道配置中单独启用或关闭。选择明确的 Agent Preset 后，在默认 IM 目录下创建或复用 `presets/<preset-id>` 工作区，标题使用 Preset 名称；后续新会话进入该分组。已有聊天保留原历史和位置，手动目录、会话级目录和飞书目录隔离优先。详见 [配置和行为](docs/preset-workspaces.md)。
+
 
 - **图片识别**：支持图片输入的内置渠道都可以把 JPEG、PNG、WebP，以及以图片文件方式发送的 GIF 交给 Harness；图片可以附带文字说明。默认每张原图最多接收 30 MB、每条消息最多 20 张；原图保存到会话工作区，模型副本自动缩放或压缩到单张 5 MB、总计 20 MB 以内，仍超限或模型不支持图片时按文件交给模型处理。这四项限制可在「通用设置 → 附件 → 图片输入」调整，对后续消息生效；原图沿用附件保留时长。调高模型输入上限会增加请求体积、处理耗时和模型成本，也仍受平台及宿主限制。iMessage 首版仅支持文本私聊。
 - **在机器人卡片切换工作区**：设置页中的每张机器人卡片都会显示当前 Harness 工作区。可以直接填写已有目录的绝对路径，也可以打开目录选择器。切换只清除该机器人的旧聊天映射，不会删除、清空或归档旧 Session；已经开始的回复可以继续完成，后续消息使用新工作区。
@@ -419,13 +469,12 @@ dsh web --trusted-host dsh.example.com
 
 ## 联系方式
 
-欢迎加入企业微信群，或通过邮箱、微信、小红书或 WhatsApp 联系我。
+欢迎加入 QQ群，或通过邮箱、小红书或 WhatsApp 联系我。
 
 <table>
   <tr>
     <th align="center">邮箱</th>
-    <th align="center">企业微信群</th>
-    <th align="center">微信</th>
+    <th align="center">QQ群</th>
     <th align="center">小红书</th>
     <th align="center">WhatsApp</th>
   </tr>
@@ -434,10 +483,7 @@ dsh web --trusted-host dsh.example.com
       <a href="mailto:longmanr307@gmail.com">longmanr307@gmail.com</a>
     </td>
     <td align="center" valign="top">
-      <a href="docs/images/wecom.png"><img src="docs/images/wecom.png" alt="dsh-im 企业微信群二维码" width="240"></a>
-    </td>
-    <td align="center" valign="top">
-      <a href="docs/images/weixin.jpg"><img src="docs/images/weixin.jpg" alt="微信二维码" width="240"></a>
+      <a href="docs/images/QQ.png"><img src="docs/images/QQ.png" alt="dsh-im QQ群二维码" width="240"></a>
     </td>
     <td align="center" valign="top">
       <a href="docs/images/xhs.jpg"><img src="docs/images/xhs.jpg" alt="小红书二维码" width="240"></a>

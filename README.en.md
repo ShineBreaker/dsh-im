@@ -259,6 +259,40 @@ See the [Proactive Delivery Guide](PROACTIVE_DELIVERY.en.md) ([简体中文](PRO
 
 DSH versions supporting global panels show **IM bots** in the left sidebar, using a thin monochrome outline of the catalog's linked speech bubbles to open the full management panel. Settings → IM bots and the plugin detail page's Open IM bots action remain available. Shells can also embed the panel through the optional `dshImClient` service. See the [client integration guide](docs/client-integration.md) for the contract, compatibility requirements and lifecycle example.
 
+### Session → conversation lookup (host service)
+
+Other plugins may receive only a Session id while needing to know which channel, bot, chat, or topic owns it. The host service `dshIm` exposes a read-only lookup for that purpose:
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null — the Session is not owned by an IM conversation
+// otherwise:
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- Read-only: no network access, session creation, blocking reply, or thrown error; unknown Sessions return `null`.
+- Data comes from the plugin's state files (`sessions`) and bot configuration; no new core fields are required.
+- `chatType` is `group`, `thread`, or `dm`; a `direct:dm:<id>` key supplies `<id>` as `senderId`.
+- The first lookup logs one line per Session; later lookups do not repeat it.
+- The bridge remembers the last inbound author's id, name, username, and bot flag in the bot state, without storing message text.
+
+### The two binding events
+
+A binding change is announced synchronously, so a subscriber keeps its own session → identity table without asking back:
+
+| Event | Emitted when | Payload |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | a conversation is bound to a session, before `session.create` | `channel`, `botId`, `sessionId`, `conversationKey`, `chatType`, `chatId`, `threadId`, `senderId`, `senderName` |
+| `dsh-im/session-unbind` | the conversation no longer points at its session: it moved to another one, or the binding was cleared | the same fields without the author; `sessionId` is the old session that was detached |
+
+- Both are synchronous, and the order is detach-then-bind, so a subscriber reads one straight line.
+- Only committed writes announce anything: a refused write (`false`) or a rewrite of the same session emits no `unbind`.
+- Clearing one binding (`clearSession`) or every binding (`clearSessions`) emits a `session-unbind` per conversation.
+- A throwing subscriber never breaks message handling.
+- A detach does not erase the session's identity: keeping the row (with a `superseded_at`, for instance) still lets a scheduled task that owns that session deliver into the original chat — only "who owns this conversation" has to be answered from the latest bind.
+
 ### Context enhancement
 
 [Read the context enhancement guide](docs/context-enhancement.md)
@@ -320,6 +354,11 @@ Web and bot approvals share one decision: the first allow-once or reject wins an
 DingTalk menus use a shared template built into the plugin; no template setup is needed for each bot. A menu stays active for 30 minutes. Send `/m` again after expiry or a Host restart. Maintainers can import `assets/dingtalk-menu-template.json` into DingTalk's card platform to maintain the template.
 
 ## Other features
+
+### Group new sessions by Agent Preset
+
+Set `groupByAgentPreset: true` in the plugin Host config to opt in (off by default). A per-channel value overrides the plugin default. An explicit preset creates or reuses a named `presets/<preset-id>` workspace under the default IM directory for new sessions. Existing chats retain their history and location; manual workspaces, conversation overrides and Feishu directory isolation take priority. See [configuration and behavior](docs/preset-workspaces.md).
+
 
 - **Image understanding**: built-in channels with image input support can send JPEG, PNG, WebP, and GIF files sent as images to Harness, with an optional text description. Originals are saved in the workspace (default 30 MB per image, 20 images per message). Model copies are resized or compressed within configurable 5 MB per-image and 20 MB total budgets, with workspace-file fallback when necessary. Configure these limits in General settings → Attachments → Image input. iMessage's MVP supports text DMs only.
 - **Switch workspaces from a bot card**: every bot card on the settings page shows its current Harness workspace. Enter an existing absolute directory path directly or open the directory picker. Switching clears only that bot's old chat mappings; it never deletes, empties, or archives old Sessions. Replies already in progress may finish, while later messages use the new workspace.
@@ -416,13 +455,12 @@ To pin one language regardless of who is reading the interface, set `language` i
 
 ## Contact
 
-Join the WeCom community group, or reach me by email, WeChat, Xiaohongshu, or WhatsApp.
+Join the QQ community group, or reach me by email, Xiaohongshu, or WhatsApp.
 
 <table>
   <tr>
     <th align="center">Email</th>
-    <th align="center">WeCom Group</th>
-    <th align="center">WeChat</th>
+    <th align="center">QQ Group</th>
     <th align="center">Xiaohongshu</th>
     <th align="center">WhatsApp</th>
   </tr>
@@ -431,10 +469,7 @@ Join the WeCom community group, or reach me by email, WeChat, Xiaohongshu, or Wh
       <a href="mailto:longmanr307@gmail.com">longmanr307@gmail.com</a>
     </td>
     <td align="center" valign="top">
-      <a href="docs/images/wecom.png"><img src="docs/images/wecom.png" alt="dsh-im WeCom group QR code" width="240"></a>
-    </td>
-    <td align="center" valign="top">
-      <a href="docs/images/weixin.jpg"><img src="docs/images/weixin.jpg" alt="WeChat QR code" width="240"></a>
+      <a href="docs/images/QQ.png"><img src="docs/images/QQ.png" alt="dsh-im QQ group QR code" width="240"></a>
     </td>
     <td align="center" valign="top">
       <a href="docs/images/xhs.jpg"><img src="docs/images/xhs.jpg" alt="Xiaohongshu QR code" width="240"></a>

@@ -6,6 +6,11 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+### Added / 新增
+
+- 新增默认关闭的 `groupByAgentPreset` 选项，按明确选择的 Agent Preset 为后续新会话创建工作区分组；已有聊天、手动工作区和飞书会话隔离目录保持原路径。
+  Added opt-in `groupByAgentPreset` workspace grouping for new sessions with an explicitly selected Agent Preset. Existing chats, manual workspaces and Feishu conversation directories keep their paths.
+
 ## [5.8.0] - 2026-10-30
 
 ### Added / 新增

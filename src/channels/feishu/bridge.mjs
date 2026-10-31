@@ -96,6 +96,7 @@ import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import {
   MENU_PAGE_SIZE,
   PRESET_FOLLOW_DEFAULT_SENTINEL,
+  REASONING_DEFAULT_SENTINEL,
   STEER_CUSTOM_SENTINEL,
   approvalCard,
   completionCard,
@@ -2429,7 +2430,9 @@ export class FeishuHarnessBridge {
           ? `preset:select:${option}`
           : action === 'model_pick' && typeof option === 'string'
             ? `model:select:${option}`
-            : action === 'archive_pick' && typeof option === 'string'
+            : action === 'reasoning_pick' && typeof option === 'string'
+              ? `reasoning:select:${option}`
+              : action === 'archive_pick' && typeof option === 'string'
               ? `archive:${option}`
               : action === 'steer_pick' && typeof option === 'string'
                 ? `steer:${option}`
@@ -2438,6 +2441,7 @@ export class FeishuHarnessBridge {
       ?? nonEmptyString(event?.open_message_id)
       ?? nonEmptyString(event?.message_id);
     const route = messageId ? this.#cardKeys.get(messageId) : null;
+    const modelPage = route?.modelPage ?? 0;
     if (!route) {
       // A route is also the trusted direct/group scope for the unified policy.
       // Without it, fail closed instead of producing an unauthorised side effect.
@@ -2479,7 +2483,7 @@ export class FeishuHarnessBridge {
     this.#cardKeys.set(messageId, route);
     const newSessionActionId = nonEmptyString(actionValue.newSessionActionId);
     if (resolvedAction === 'new' && (!route.menuContext || !newSessionActionId)) return Promise.resolve();
-    const entry = { ...route, messageId, selections: multiValues, operatorOpenId, newSessionActionId };
+    const entry = { ...route, messageId, selections: multiValues, operatorOpenId, newSessionActionId, modelPage };
     const source = nonEmptyString(actionValue.source);
     const formText = nonEmptyString(formValue.steer_text);
     const eventId = nonEmptyString(event?.event_id)
@@ -2688,6 +2692,7 @@ export class FeishuHarnessBridge {
     sessionWorkspace = null,
     sessionPage = 0,
     sessionLimit = null,
+    modelPage = 0,
     selections = [],
     actor = null,
     menuContext = null,
@@ -2908,8 +2913,9 @@ export class FeishuHarnessBridge {
       await this.#showPresetCard(key, chatId, { updateMessageId: messageId });
       return;
     }
-    if (action === 'models') {
-      await this.#showModelCard(key, chatId, { updateMessageId: messageId });
+    if (action === 'models' || /^models:\d+$/.test(action)) {
+      const page = action === 'models' ? 0 : Number(action.slice('models:'.length));
+      await this.#showModelCard(key, chatId, { updateMessageId: messageId, page: Math.max(0, page) });
       return;
     }
     if (action === 'status') {
@@ -2940,7 +2946,12 @@ export class FeishuHarnessBridge {
     }
     if (action.startsWith('model:select:')) {
       const modelId = action.slice('model:select:'.length);
-      await this.#handleModelSelect(key, chatId, modelId, { updateMessageId: messageId });
+      await this.#handleModelSelect(key, chatId, modelId, { updateMessageId: messageId, page: modelPage });
+      return;
+    }
+    if (action.startsWith('reasoning:select:')) {
+      const effort = action.slice('reasoning:select:'.length);
+      await this.#handleReasoningSelect(key, chatId, effort, { updateMessageId: messageId, page: modelPage });
       return;
     }
     if (action.startsWith('use:')) {
@@ -3252,6 +3263,9 @@ export class FeishuHarnessBridge {
       sessionPage: Number.isSafeInteger(options.sessionPage) && options.sessionPage >= 0
         ? options.sessionPage
         : 0,
+      modelPage: Number.isSafeInteger(options.modelPage) && options.modelPage >= 0
+        ? options.modelPage
+        : 0,
       sessionLimit: Number.isSafeInteger(options.sessionLimit) && options.sessionLimit > 0
         ? options.sessionLimit
         : null,
@@ -3532,7 +3546,7 @@ export class FeishuHarnessBridge {
   /**
    * Fetch the model catalog and show the model selection card.
    */
-  async #showModelCard(key, chatId, { updateMessageId = null } = {}) {
+  async #showModelCard(key, chatId, { updateMessageId = null, page = 0 } = {}) {
     try {
       const signal = this.#cardDataSignal();
       await this.#harness.ensureRunning({ signal });
@@ -3548,7 +3562,7 @@ export class FeishuHarnessBridge {
       if (!catalog) {
         catalog = await this.#harness.listModels({ signal });
       }
-      await this.#sendCard(chatId, modelCard(catalog), { key, updateMessageId });
+      await this.#sendCard(chatId, modelCard(catalog, { page }), { key, updateMessageId, modelPage: page });
     } catch (error) {
       await this.#sendFailure(chatId, error, { logLabel: 'model card', replyTo: updateMessageId });
     }
@@ -3792,7 +3806,29 @@ export class FeishuHarnessBridge {
    * catalog validation, busy checks, pending-interaction checks and the
    * session binding lock stay in one place.
    */
-  async #handleModelSelect(key, chatId, modelId, { updateMessageId = null, replyTo = null } = {}) {
+  async #handleReasoningSelect(key, chatId, effort, { updateMessageId = null, replyTo = null, page = 0 } = {}) {
+    try {
+      const command = effort === REASONING_DEFAULT_SENTINEL ? '/reasoning --default' : `/reasoning ${effort}`;
+      const result = await runModelCommand(command, this.#harness, this.#state, key, {
+        signal: this.#signal,
+        pendingInteraction: this.#hasPendingInteraction(key),
+        control: { owner: this, key },
+      });
+      for (const reply of result?.messages ?? [result?.message]) {
+        if (reply) await this.#send(chatId, reply, { replyTo });
+      }
+    } catch (error) {
+      await this.#sendFailure(chatId, error, { logLabel: 'reasoning selection', replyTo: updateMessageId });
+      return;
+    }
+    try {
+      await this.#showModelCard(key, chatId, { updateMessageId, page });
+    } catch (error) {
+      this.#logger.warn?.('[dsh-feishu] model card refresh failed after reasoning select:', error.message);
+    }
+  }
+
+  async #handleModelSelect(key, chatId, modelId, { updateMessageId = null, replyTo = null, page = 0 } = {}) {
     try {
       const result = await runModelCommand(
         `/model ${modelId}`, this.#harness, this.#state, key, {
@@ -3809,9 +3845,9 @@ export class FeishuHarnessBridge {
       return;
     }
     try {
-      await this.#sendMenuCard(key, chatId, { updateMessageId, replyTo });
+      await this.#showModelCard(key, chatId, { updateMessageId, page });
     } catch (error) {
-      this.#logger.warn?.('[dsh-feishu] menu refresh failed after model select:', error.message);
+      this.#logger.warn?.('[dsh-feishu] model card refresh failed after model select:', error.message);
     }
   }
 
