@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { ensurePresetWorkspace } from './preset-workspaces.mjs';
 import { t } from './i18n.mjs';
 import { normalizeBusyMessageMode, validateBusyMessageMode } from './message-mode.mjs';
@@ -25,7 +26,7 @@ import {
   validateAccessPolicy,
 } from './access-policy.mjs';
 import { CONNECTION_TEST_STATE_IDENTITY } from './connection-test.mjs';
-import { SESSION_BINDING_STATE_IDENTITY } from './session-binding-lock.mjs';
+import { SESSION_BINDING_STATE_IDENTITY, withSessionBindingLock } from './session-binding-lock.mjs';
 import {
   DEFAULT_CONTEXT_ENHANCEMENT_CONFIG,
   normalizeContextEnhancementConfig,
@@ -1781,6 +1782,12 @@ function unavailableModel() {
   return error;
 }
 
+function unavailableModelCatalog(cause) {
+  const error = new Error(t('无法读取所选模型的列表，模型设置未保存，请重试。'), { cause });
+  error.code = 'model-catalog-unavailable';
+  return connectionStageError(error, 'status.read', undefined, { method: 'llm.models' });
+}
+
 function assertCurrentBotScope(isCurrentScope) {
   if (isCurrentScope()) return;
   const error = new Error('找不到要修改的机器人。');
@@ -1992,14 +1999,30 @@ export function createBotWorkspaceScope(
 
   const scopedHarness = new Proxy(harness, {
     get(target, property) {
+      if (property === 'sessionFor') {
+        // Read-only state lookup used by /sessionlist to mark the binding. The
+        // state proxy owns the generation checks, so delegate instead of
+        // exposing the raw mapping.
+        return (key, ...args) => scopedState.sessionFor(key, ...args);
+      }
       if (property === 'resolveDsBotSession') {
         return async (key) => {
           assertCurrentBotScope(isCurrentScope);
           const binding = dsBinding(key);
           if (!binding) return null;
           if (!dsBot) throw deliveryTargetError('ds-bot-unavailable', 'DS Bot 当前不可用，请检查插件状态。');
-          const bot = await dsBot.resolve(binding.dsBotId);
-          if (!(await target.sessionExists(bot.sessionId))) {
+          let bot = await dsBot.resolve(binding.dsBotId);
+          if (typeof target.isSessionArchived === 'function' && (await target.isSessionArchived(bot.sessionId))) {
+            for (let i = 0; i < 5; i += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              const updated = await dsBot.resolve(binding.dsBotId).catch(() => null);
+              if (updated && updated.sessionId !== bot.sessionId && !(await target.isSessionArchived(updated.sessionId))) {
+                bot = updated;
+                break;
+              }
+            }
+          }
+          if (!(await target.sessionExists(bot.sessionId)) || (typeof target.isSessionArchived === 'function' && (await target.isSessionArchived(bot.sessionId)))) {
             throw deliveryTargetError('ds-bot-not-found', 'DS Bot 的当前会话不可用。');
           }
           assertCurrentBotScope(isCurrentScope);
@@ -2079,6 +2102,24 @@ export function createBotWorkspaceScope(
             error.code = 'workspace-bot-not-found';
             throw error;
           }
+        };
+      }
+      if (property === 'archiveWorkspaceSession' && typeof target[property] === 'function') {
+        // Archiving mutates Harness state, so it checks the bot scope on both
+        // sides of the call like every other write this scope exposes.
+        return async (...args) => {
+          if (!isCurrentScope()) {
+            const error = new Error('找不到要修改的机器人。');
+            error.code = 'workspace-bot-not-found';
+            throw error;
+          }
+          const result = await target.archiveWorkspaceSession(...args);
+          if (!isCurrentScope()) {
+            const error = new Error('找不到要修改的机器人。');
+            error.code = 'workspace-bot-not-found';
+            throw error;
+          }
+          return result;
         };
       }
       if ((property === 'listWorkspaces'
@@ -2282,7 +2323,8 @@ export function createBotWorkspaceScope(
         };
       }
       if (property === 'bindWorkspaceSession') {
-        return async (conversationKey, sessionId) => {
+        return async (conversationKey, sessionId, options = {}) => {
+          const { expectedWorkspace } = options;
           assertNoDsBinding(conversationKey);
           if (typeof conversationKey !== 'string' || !conversationKey
             || typeof sessionId !== 'string' || !sessionId) {
@@ -2319,17 +2361,27 @@ export function createBotWorkspaceScope(
             || adopted.sessionId !== sessionId || typeof adopted.workspace !== 'string') {
             throw new TypeError('Harness returned an invalid adopted workspace session');
           }
+          // Title selection is local to the Workspace observed by the search.
+          // Recheck it here before committing; explicit IDs retain their
+          // existing bot-wide switching behavior.
+          const localBinding = expectedWorkspace !== undefined;
+          if (localBinding
+            && (!(await sameWorkspacePath(adopted.workspace, expectedWorkspace))
+              || !(await sameWorkspacePath(adopted.workspace,
+                await scopedHarness.resolveConversationWorkspace(conversationKey))))) {
+            throw workspaceSessionStale('The conversation workspace changed during session selection.');
+          }
           // Selecting another session in the current automatic group must not
           // turn that group into the bot's manual directory and clear every
           // other conversation. Explicit cross-workspace selection keeps its
           // existing bot-wide semantics.
           const baseWorkspace = workspaces.workspaceFor(botId);
-          const preserveBotWorkspace = !workspaces.hasConversationWorkspaceOverride(botId, conversationKey)
+          const preserveBotWorkspace = localBinding || (!workspaces.hasConversationWorkspaceOverride(botId, conversationKey)
             && normalizeAgentPresetId(basename(adopted.workspace)) !== null
             && await target.isUngroupedWorkspace?.(baseWorkspace)
             && await sameWorkspacePath(dirname(adopted.workspace), join(baseWorkspace, 'presets'))
             && await sameWorkspacePath(adopted.workspace,
-              await scopedHarness.resolveConversationWorkspace(conversationKey));
+              await scopedHarness.resolveConversationWorkspace(conversationKey)));
           const bound = await workspaces.bindWorkspaceSession(botId, adopted.workspace, {
             conversationKey,
             sessionId,
@@ -2360,6 +2412,22 @@ export function createBotWorkspaceScope(
             conversationKey,
             conversationGeneration: bound.conversationGeneration ?? 0,
           });
+          // /session, /go, /prev and /next all bind through this one path, so the
+          // navigation ring records the bind here and stays in sync with the
+          // Session binding itself. Best-effort: a ring write must not fail a bind.
+          // A non-navigation bind (/session adopt) appends the Session as the
+          // ring's current position; /go, /prev and /next manage the visit stack
+          // themselves and pass { navigation: true } to skip this.
+          try {
+            const registered = await state.ensureSessionRing?.(conversationKey, sessionId, {
+              title: typeof adopted.title === 'string' && adopted.title ? adopted.title : undefined,
+            });
+            if (options.navigation !== true && registered?.entry) {
+              await state.appendRing?.(conversationKey, registered.entry.n);
+            }
+          } catch (error) {
+            console.warn('[dsh-im] unable to record the session in the navigation ring:', error?.message ?? error);
+          }
           return {
             ...adopted,
             workspace: bound.workspace,
@@ -2492,8 +2560,10 @@ export function createBotWorkspaceScope(
             // actual outcome even if a workspace switch commits concurrently.
             return target[method](sessionId, ...args);
           };
+          let replySessionId = sessionId;
           return Object.freeze({
             sessionId,
+            get replySessionId() { return replySessionId; },
             async sessionExists(...args) {
               if (!isCurrentSession()) return false;
               const exists = await target.sessionExists(sessionId, ...args);
@@ -2531,7 +2601,15 @@ export function createBotWorkspaceScope(
               }
               // This is a Bot-wide setting. Never mutate only the IM session: DS
               // Bot applies the choice to its own and group sessions as well.
-              return dsBot.updateBotModel(dsBotId, selection, options);
+              const result = await dsBot.updateBotModel(dsBotId, selection, options);
+              const selected = result?.selected;
+              if (!selected || selected.reasoningEffort !== undefined) return result;
+              // Without a level DS Bot sends none, and DSH runs the model's
+              // default one: report the level the Session actually runs.
+              const current = (await target.getSessionModels(sessionId, options))?.current;
+              return current?.provider === selected.provider && current?.model === selected.model
+                ? { selected: { ...current } }
+                : result;
             },
             isRunning(...args) {
               return invokeCurrentSession('isSessionRunning', args, 'run-state check');
@@ -2566,7 +2644,63 @@ export function createBotWorkspaceScope(
                   throw workspaceSessionStale('DS Bot changed before this prompt started.');
                 }
               }
-              return target.ask(sessionId, ...args);
+              if (!dsBotId) return target.ask(sessionId, ...args);
+              const options = typeof args[1] === 'number' ? { timeoutMs: args[1] } : args[1] ?? {};
+              const handoffResources = { stagedBatches: [] };
+              let currentSessionId = sessionId;
+              let promptRpcId;
+              const assertStillBound = () => {
+                options.signal?.throwIfAborted();
+                if (!isCurrentSession()) {
+                  // This input was already accepted. A stale-session error here
+                  // would cause the outer loop to submit it again after unbind.
+                  throw new DOMException('DS Bot binding changed while awaiting a reply.', 'AbortError');
+                }
+              };
+              for (;;) {
+                try {
+                  const answer = promptRpcId
+                    ? await target.waitForTransferredReply(currentSessionId, {
+                        ...options, handoffResources, promptRpcId, assertCurrent: assertStillBound,
+                      })
+                    : await target.ask(sessionId, args[0], { ...options, handoffResources });
+                  if (promptRpcId) assertStillBound();
+                  replySessionId = currentSessionId;
+                  return answer;
+                } catch (askError) {
+                  if (!dsBotId || !['session-archived', 'turn-blocked'].includes(askError?.code)) throw askError;
+                  assertStillBound();
+                  const evidence = extractConnectionEvidence(askError);
+                  const notSubmitted = evidence.details.submissionState === 'not-submitted';
+                  const accepted = askError.promptAccepted === true || evidence.details.submissionState === 'accepted';
+                  const originalRpcId = promptRpcId ?? askError.details?.promptRpcId ?? evidence.correlation.promptRpcId;
+                  // A failed submit can have an unknown outcome. Only explicit
+                  // pre-submit evidence permits replay; everything else needs
+                  // the durable identity of an accepted message to follow.
+                  if (!notSubmitted && (!accepted || !originalRpcId
+                    || typeof target.waitForTransferredReply !== 'function')) throw askError;
+                  let fresh;
+                  for (let attempt = 0; attempt < 6; attempt += 1) {
+                    assertStillBound();
+                    fresh = await dsBot.resolve(dsBotId).catch(() => null);
+                    assertStillBound();
+                    if (fresh && fresh.sessionId !== currentSessionId) break;
+                    await delay(200, undefined, { signal: options.signal });
+                  }
+                  if (!fresh || fresh.sessionId === currentSessionId) throw askError;
+                  if (notSubmitted) throw workspaceSessionStale('DS Bot rolled over before this prompt was submitted.');
+                  currentSessionId = fresh.sessionId;
+                  promptRpcId = originalRpcId;
+                  await withSessionBindingLock(state, conversationKey, async () => {
+                    assertStillBound();
+                    await state.setSession(conversationKey, currentSessionId);
+                    assertStillBound();
+                    sessionGenerations.set(currentSessionId, {
+                      generation, conversationKey, conversationGeneration,
+                    });
+                  });
+                }
+              }
             },
           });
         };
@@ -2579,6 +2713,26 @@ export function createBotWorkspaceScope(
             return false;
           }
           return target.sessionExists(sessionId, ...args);
+        };
+      }
+      if (property === 'forkSession') {
+        return async (sessionId, options = {}) => {
+          if (!isCurrentScope()) {
+            throw workspaceSessionStale('The bot workspace changed before the fork.');
+          }
+          if (generationIsStale(sessionGenerations.get(sessionId))) {
+            throw workspaceSessionStale('The session is no longer in the current workspace.');
+          }
+          if (typeof target.forkSession !== 'function') {
+            const error = new Error('The Host does not support forking sessions');
+            error.code = 'harness-api-not-found';
+            throw error;
+          }
+          const result = await target.forkSession(sessionId, options);
+          if (!isCurrentScope()) {
+            throw workspaceSessionStale('The bot workspace changed while the fork was running.');
+          }
+          return result;
         };
       }
       if (property === 'ask') {
@@ -2745,9 +2899,18 @@ export function createWorkspaceAwareController(controller, {
         error.code = 'workspace-bot-not-found';
         throw error;
       }
-      const catalog = model && modelCatalog
-        ? await resolveModelCatalog(modelCatalog, { fresh: true })
-        : null;
+      let catalog = null;
+      if (model && modelCatalog) {
+        try {
+          catalog = await resolveModelCatalog(modelCatalog, { fresh: true, throwOnError: true });
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error;
+          throw unavailableModelCatalog(error);
+        }
+        if (catalog?.failures.some((failure) => failure.id === model.provider)) {
+          throw unavailableModelCatalog();
+        }
+      }
       const entry = modelCatalogEntry(catalog, model);
       if (model && (!modelCatalog || !entry)) {
         throw unavailableModel();

@@ -79,6 +79,7 @@ import {
   replacePageLocation,
 } from './loopback-recovery.js';
 import { installImStyles } from './styles.js';
+import { DELIVERY_SYNC_SETTINGS_RPC_CHANNEL } from './delivery-sync-settings.js';
 import { installSessionChannelLogos } from './session-channel-logos.js';
 import { installDsBotSessionAvatars } from './ds-bot-session-avatars.js';
 import { UpdatePanel, UPDATE_RPC_CHANNEL } from './update-panel.js';
@@ -87,6 +88,7 @@ import { IMPanelErrorBoundary } from './panel-error-boundary.js';
 import { installImPluginPage } from './plugin-page.js';
 import { installSidebarVisibilitySync, SIDEBAR_SETTINGS_ENDPOINTS, SIDEBAR_SETTINGS_RPC_CHANNEL } from './sidebar-settings.js';
 
+import { installChannelSessionsPage, CHANNEL_LIST_RPC_CHANNEL } from './im-channels.js';
 export const name = 'im-settings';
 export const inject = ['slots', 'connection', 'locale', 'workspaces'];
 export const IM_PLUGIN_VERSION = manifest.version;
@@ -236,7 +238,10 @@ export function IMSettingsTab({
   updateRpcCall,
   deliveryRpcCall,
   globalSettingsRpcCall,
+  deliverySyncRpcCall,
+  languageRpcCall,
   workspaceDirectoryPicker,
+  onOpenSessionHistory,
   preferredSectionId,
   browserLocation = globalThis.location,
   navigateToRecoveryUrl = replacePageLocation,
@@ -258,6 +263,7 @@ export function IMSettingsTab({
     [emailEnabled],
   );
   const githubTooltipId = React.useId();
+  const sessionHistoryTooltipId = React.useId();
   const generalSettingsTooltipId = React.useId();
   const globalSettingsSelected = selected === GLOBAL_SETTINGS_TAB_ID;
   const active = visibleChannels.find((channel) => channel.id === selected) ?? visibleChannels[0];
@@ -288,6 +294,8 @@ export function IMSettingsTab({
     updateRpcCall,
     deliveryRpcCall,
     globalSettingsRpcCall,
+    deliverySyncRpcCall,
+    languageRpcCall,
     imessageRpcCall,
     emailRpcCall,
     matrixRpcCall,
@@ -301,6 +309,7 @@ export function IMSettingsTab({
     deliveryRpcCall,
     feishuRpcCall,
     globalSettingsRpcCall,
+    deliverySyncRpcCall,
     imessageRpcCall,
     emailRpcCall,
     matrixRpcCall,
@@ -356,6 +365,25 @@ export function IMSettingsTab({
           className: 'dim-githubTooltip',
           role: 'tooltip',
         }, '帮助与反馈 · 前往 GitHub')),
+      onOpenSessionHistory ? h('span', { className: 'dim-sessionHistoryAction' },
+        h('button', {
+          type: 'button',
+          className: 'dim-sessionHistoryButton',
+          'aria-label': '会话记录',
+          'aria-describedby': sessionHistoryTooltipId,
+          onClick: onOpenSessionHistory,
+        }, h('svg', {
+          width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
+          stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+          focusable: 'false', 'aria-hidden': 'true',
+        },
+        h('path', { d: 'M21 15a3 3 0 0 1-3 3H7l-4 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3Z' }),
+        h('path', { d: 'M8 8h8M8 12h5' }))),
+        h('span', {
+          id: sessionHistoryTooltipId,
+          className: 'dim-sessionHistoryTooltip',
+          role: 'tooltip',
+        }, '会话记录')) : null,
       h('span', { className: 'dim-generalSettingsAction' },
         h('button', {
           type: 'button',
@@ -411,7 +439,11 @@ export function IMSettingsTab({
         : null,
       h(BotSettingsContext.Provider, { value: botSettingsContext },
         globalSettingsSelected
-          ? h(GlobalSettingsPanel, { rpcCall: rpcCalls.globalSettingsRpcCall })
+          ? h(GlobalSettingsPanel, {
+              rpcCall: rpcCalls.globalSettingsRpcCall,
+              deliverySyncRpcCall: rpcCalls.deliverySyncRpcCall,
+              languageRpcCall: rpcCalls.languageRpcCall,
+            })
           : deliverySettings?.channel === active.id
           ? h(DeliveryTargetSettingsPage, {
               channel: active.id,
@@ -555,6 +587,12 @@ export function apply(ctx) {
   const globalSettingsRpcCall = (endpoint, payload, signal) =>
     managementRpc(ctx.connection, Object.values(SIDEBAR_SETTINGS_ENDPOINTS).includes(endpoint)
       ? SIDEBAR_SETTINGS_RPC_CHANNEL : GLOBAL_SETTINGS_RPC_CHANNEL, endpoint, payload, signal);
+  const deliverySyncRpcCall = (endpoint, payload, signal) =>
+    managementRpc(ctx.connection, DELIVERY_SYNC_SETTINGS_RPC_CHANNEL, endpoint, payload, signal);
+  const languageRpcCall = (endpoint, payload, signal) =>
+    managementRpc(ctx.connection, HOST_LANGUAGE_RPC_CHANNEL, endpoint, payload, signal);
+  const channelListRpcCall = (endpoint, payload, signal) =>
+    managementRpc(ctx.connection, CHANNEL_LIST_RPC_CHANNEL, endpoint, payload, signal);
   const workspaceDirectoryPicker = Object.freeze({
     listDirectory: (path, signal) =>
       callWorkspaceDirectoryApi(ctx, 'listDirectory', path, signal),
@@ -579,6 +617,9 @@ export function apply(ctx) {
     updateRpcCall,
     deliveryRpcCall,
     globalSettingsRpcCall,
+    languageRpcCall,
+    deliverySyncRpcCall,
+    channelListRpcCall,
     workspaceDirectoryPicker,
   };
   const subscribeLocale = (listener) => typeof ctx.on === 'function'
@@ -589,8 +630,14 @@ export function apply(ctx) {
   // new component type and reset the reader's selected tab or unsaved input.
   function IMPanel({ preferredSectionId }) {
     React.useSyncExternalStore(subscribeLocale, localeSnapshot, localeSnapshot);
+    const historyAvailable = React.useSyncExternalStore(
+      channelSessionsPage.subscribe, channelSessionsPage.available, channelSessionsPage.available,
+    );
     return h(IMPanelErrorBoundary, null,
-      h(IMSettingsTab, { ...panelDependencies, preferredSectionId }));
+      h(IMSettingsTab, {
+        ...panelDependencies, preferredSectionId,
+        onOpenSessionHistory: historyAvailable ? channelSessionsPage.open : undefined,
+      }));
   }
   const buildPanelElement = (props = {}) => h(IMPanel, {
     preferredSectionId: props.preferredSectionId,
@@ -600,6 +647,7 @@ export function apply(ctx) {
     packageName: manifest.name,
     renderPanel: buildPanelElement,
   });
+  const channelSessionsPage = installChannelSessionsPage(ctx, { channelListRpcCall });
 
   ctx.effect(() => {
     sidebarSync = installSidebarVisibilitySync({

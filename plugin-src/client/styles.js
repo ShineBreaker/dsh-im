@@ -114,14 +114,14 @@ const CSS = String.raw`
 .dim-githubLink:focus-visible { outline: 2px solid color-mix(in srgb, var(--dim-blue) 70%, white); outline-offset: 2px; }
 .dim-updateTooltip, .dim-githubTooltip { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: max-content; max-width: min(220px, 80vw); padding: 6px 9px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 7px; color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(31 35 41 / 14%); font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none; transition: opacity .15s ease, transform .15s ease, visibility .15s ease; }
 .dim-updateAction:hover .dim-updateTooltip, .dim-updateTrigger:focus-visible + .dim-updateTooltip, .dim-githubAction:hover .dim-githubTooltip, .dim-githubAction:focus-within .dim-githubTooltip { opacity: 1; visibility: visible; transform: translateY(0); }
-.dim-generalSettingsAction { position: relative; display: inline-flex; flex: none; }
-.dim-generalSettingsButton { width: 30px; height: 30px; display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 8px; color: var(--dsw-alias-label-secondary, #646a73); background: var(--dsw-alias-bg-layer-1, #fff); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease, box-shadow .15s ease; }
-.dim-generalSettingsButton svg { display: block; }
-.dim-generalSettingsButton:hover { border-color: #aeb3bb; color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-interactive-bg-hover, #f7f8fa); }
+.dim-sessionHistoryAction, .dim-generalSettingsAction { position: relative; display: inline-flex; flex: none; }
+.dim-sessionHistoryButton, .dim-generalSettingsButton { width: 30px; height: 30px; display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 8px; color: var(--dsw-alias-label-secondary, #646a73); background: var(--dsw-alias-bg-layer-1, #fff); cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease, box-shadow .15s ease; }
+.dim-sessionHistoryButton svg, .dim-generalSettingsButton svg { display: block; }
+.dim-sessionHistoryButton:hover, .dim-generalSettingsButton:hover { border-color: #aeb3bb; color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-interactive-bg-hover, #f7f8fa); }
 .dim-generalSettingsButton[aria-current="page"] { border-color: color-mix(in srgb, var(--dim-blue) 42%, var(--dsw-alias-border-l2, #dfe1e5)); color: var(--dim-blue); background: var(--dim-blue-soft); }
-.dim-generalSettingsButton:focus-visible { outline: 2px solid color-mix(in srgb, var(--dim-blue) 70%, white); outline-offset: 2px; }
-.dim-generalSettingsTooltip { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: max-content; padding: 6px 9px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 7px; color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(31 35 41 / 14%); font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none; transition: opacity .15s ease, transform .15s ease, visibility .15s ease; }
-.dim-generalSettingsAction:hover .dim-generalSettingsTooltip, .dim-generalSettingsButton:focus-visible + .dim-generalSettingsTooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+.dim-sessionHistoryButton:focus-visible, .dim-generalSettingsButton:focus-visible { outline: 2px solid color-mix(in srgb, var(--dim-blue) 70%, white); outline-offset: 2px; }
+.dim-sessionHistoryTooltip, .dim-generalSettingsTooltip { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: max-content; padding: 6px 9px; border: 1px solid var(--dsw-alias-border-l2, #dfe1e5); border-radius: 7px; color: var(--dsw-alias-label-primary, #1f2329); background: var(--dsw-alias-bg-layer-3, #fff); box-shadow: 0 8px 24px rgb(31 35 41 / 14%); font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateY(-3px); pointer-events: none; transition: opacity .15s ease, transform .15s ease, visibility .15s ease; }
+.dim-sessionHistoryAction:hover .dim-sessionHistoryTooltip, .dim-sessionHistoryButton:focus-visible + .dim-sessionHistoryTooltip, .dim-generalSettingsAction:hover .dim-generalSettingsTooltip, .dim-generalSettingsButton:focus-visible + .dim-generalSettingsTooltip { opacity: 1; visibility: visible; transform: translateY(0); }
 .dim-generalSettingsButton[aria-current="page"] + .dim-generalSettingsTooltip { opacity: 0; visibility: hidden; transform: translateY(-3px); }
 .dim-layout { display: grid; grid-template-columns: 174px 1px minmax(0, 1fr); gap: 24px; align-items: start; }
 .dim-rail { display: grid; align-content: start; gap: 8px; padding: 0 4px 1px 1px; }
@@ -822,6 +822,22 @@ const CSS = String.raw`
   .dim-directoryPickerSpinner { animation-duration: 1.8s; }
   .dim-collapsibleBody, .dim-collapsibleChevron { transition: none !important; }
 }
+/* Delivery-sync settings (General settings -> Delivery tab) */
+.dim-deliverySyncSettings { container-type: inline-size; }
+.dim-deliverySyncSettings .dim-globalHead { position: relative; }
+.dim-deliverySyncSettings .dim-globalTtlHelp { position: static; }
+.dim-globalTtlTooltip.dim-deliverySyncTooltip { width: min(360px, 100%); max-width: none; color: var(--dsw-alias-label-secondary, #646a73); font-size: 11px; line-height: 17px; white-space: normal; overflow-wrap: anywhere; }
+.dim-deliverySyncFields { min-width: 0; display: grid; gap: 16px; margin-top: 12px; }
+.dim-deliverySyncField { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 200px); align-items: start; gap: 8px 16px; }
+.dim-deliverySyncLabel { min-width: 0; display: grid; gap: 4px; }
+.dim-deliverySyncLabel > label { color: var(--dsw-alias-label-primary, #1f2329); font-size: 14px; line-height: 22px; }
+.dim-deliverySyncCheckLabel { display: flex; align-items: center; gap: 8px; }
+.dim-deliverySyncCheckLabel input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--dsw-alias-state-business-primary, #3370ff); }
+.dim-deliverySyncHelp { margin: 0; color: var(--dsw-alias-label-secondary, #646a73); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.dim-deliverySyncIcon { min-width: 0; display: grid; gap: 4px; }
+.dim-deliverySyncFields .dim-globalTtlInput { width: 100%; min-width: 0; }
+.dim-deliverySyncFeedback { margin: 10px 0 0; }
+@container (max-width: 460px) { .dim-deliverySyncField { grid-template-columns: minmax(0, 1fr); } }
 `;
 
 export function installImStyles() {

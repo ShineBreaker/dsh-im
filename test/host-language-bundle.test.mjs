@@ -18,7 +18,7 @@ async function startHost(t, language) {
     `apply${channel}`, async () => {},
   ]));
   for (const installer of [
-    'installUpdateRpc', 'installDeliveryRpc', 'installInboundTtlRpc',
+    'installUpdateRpc', 'installDeliveryRpc', 'installInboundTtlRpc', 'installDeliverySyncRpc',
     'installSidebarSettingsRpc', 'installInjectedContext',
   ]) internals[installer] = () => {};
   internals.createDeliveryService = () => ({});
@@ -28,7 +28,7 @@ async function startHost(t, language) {
   internals.applyTelegram = async () => { languageAtChannelStart = controller.language(); };
   const errors = [];
   await createImHostPlugin(internals).apply({
-    connection: { fetch: {} },
+    connection: { fetch: { register: () => () => {} } },
     logger: { error: (...args) => errors.push(args) },
   }, { dshHome, language });
   assert.deepEqual(errors, []);

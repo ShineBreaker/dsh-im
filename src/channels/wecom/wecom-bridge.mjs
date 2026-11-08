@@ -1,4 +1,5 @@
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
+import { SESSION_NAV_HELP_LINES } from '../shared/command-catalog.mjs';
 import { imageInputLimits } from '../shared/image-input-policy.mjs';
 import { imageDownloadLimitMessage } from '../shared/image-prompt.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
@@ -23,7 +24,7 @@ import {
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
-import { newConversationRefusalText } from '../shared/new-command.mjs';
+import { isResetCommand, runResetCommand } from '../shared/reset-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import {
@@ -40,6 +41,11 @@ import {
 } from '../shared/preset-command.mjs';
 import { conversationSessionWorkspace, runWorkspaceCommand, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import {
+  isSessionNavCommand,
+  runSessionNavTextCommand,
+} from '../shared/session-nav-command.mjs';
+import { createConversationSession, isNewCommand, newCommandTitle, newConversationRefusalText } from '../shared/new-command.mjs';
 import {
   captureContextEnhancement,
   captureContextEnhancementSource,
@@ -96,8 +102,10 @@ function helpText() {
     t('/workspacelist  列出工作区绝对路径'),
     t('/ws、/wsl、/workspaces  工作区命令别名'),
     t('/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题'),
+    t('/sessionlist --all  跨工作区汇总会话（每个工作区默认显示 10 个，可用 --limit N 调整）'),
     t('/sessionlist --limit N  仅列出当前工作区前 N 个会话'),
-    t('/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话'),
+    t('/session Session ID、当前工作区序号或标题关键词  将当前聊天绑定到指定会话'),
+    ...SESSION_NAV_HELP_LINES.map((line) => t(line)),
     t('/models  按序号列出所有可用模型'),
     t('/reasoninglist 或 /reasonings  按序号列出当前模型可用推理等级'),
     t('/reasoning [序号、等级ID或 --default]  查看或切换当前推理等级'),
@@ -902,17 +910,19 @@ export class WecomHarnessBridge {
       return { message: t('当前任务仍在运行，请先停止任务或等待任务完成后再开启新会话。') };
     }
     if (command === '/new') {
+      let created;
       try {
-        await this.#state.clearSession(key);
+        created = await createConversationSession({ state: this.#state, harness: this.#harness, key });
       } catch (error) {
         const refusal = newConversationRefusalText(error);
         if (refusal) return { message: refusal };
         throw error;
       }
-      return { message: t('已开启新会话。请发送你的问题。') };
+      return { message: created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。') };
     }
     return await runWorkspaceCommand(text, this.#harness, key)
       ?? await runClearCommand(text, this.#harness, this.#state, key, options)
+      ?? await runResetCommand(text, this.#harness, this.#state, key, options)
       ?? await runCompactCommand(text, this.#harness, this.#state, key, options);
   }
 
@@ -996,6 +1006,7 @@ export class WecomHarnessBridge {
       && (parseWecomMenu(commandText) || ['/help', '/status', '/new'].includes(commandText.toLowerCase())
         || this.#cardFrames.has(frame));
     const commandRunner = isClearCommand(commandText) ? runClearCommand
+      : isResetCommand(commandText) ? runResetCommand
       : isPermissionCommand(commandText) ? runPermissionCommand
       : isHistoryCommand(commandText) ? runHistoryCommand
       : hasInboundFiles(commandMessage) ? null : isControlCommand(commandText)
@@ -1398,9 +1409,10 @@ export class WecomHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      if (!hasImages && !hasFiles && command === '/new') {
+      if (!hasImages && !hasFiles && isNewCommand(text)) {
+        let created;
         try {
-          await this.#state.clearSession(key);
+          created = await createConversationSession({ state: this.#state, harness: this.#harness, key, title: newCommandTitle(text) });
         } catch (error) {
           const refusal = newConversationRefusalText(error);
           if (refusal) {
@@ -1410,7 +1422,40 @@ export class WecomHarnessBridge {
           }
           throw error;
         }
-        await this.#sendImmediate(frame, chatId, t('已开启新会话。请发送你的问题。'));
+        await this.#sendImmediate(frame, chatId, created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。'));
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      if (!hasImages && !hasFiles && isSessionNavCommand(text)) {
+        const nav = await runSessionNavTextCommand(text, this.#harness, this.#state, key, {
+          signal: this.#signal,
+        });
+        if (nav) {
+          for (const reply of nav.messages ?? [nav.message]) {
+            await this.#sendImmediate(frame, chatId, reply);
+          }
+          if (nav.askText) {
+            const followUp = this.#enqueueMessage(
+              {
+                ...frame,
+                body: {
+                  ...(frame?.body ?? {}),
+                  msgtype: 'text',
+                  text: { content: nav.askText },
+                  mixed: undefined,
+                  image: undefined,
+                  voice: undefined,
+                },
+              },
+              `${messageId}-ask`,
+              key,
+            );
+            followUp.catch((error) => {
+              this.#logger.warn?.(`[dsh-im:wecom] follow-up ask after a nav command failed:`, error?.message ?? error);
+              this.#sendImmediate(frame, chatId, t('切换后的提问发送失败，请重试。')).catch(() => undefined);
+            });
+          }
+        }
         await this.#state.markSeen(messageId);
         return;
       }

@@ -169,9 +169,15 @@ export async function askInWorkspaceSession({
           // against a conversation switch that only commits after the bind.
           const conversationGeneration = readConversationGeneration(harness, key);
           session = workspaceSession(harness, sessionId, key);
-          if (initialTitle && typeof session.renameTitle === 'function') {
+          // A title the user set with /title before any Session existed wins over
+          // the one derived from the first message, and is consumed exactly once.
+          const pendingTitle = typeof state.takePendingTitle === 'function'
+            ? await state.takePendingTitle(key).catch(() => null)
+            : null;
+          const effectiveTitle = pendingTitle || initialTitle;
+          if (effectiveTitle && typeof session.renameTitle === 'function') {
             try {
-              await session.renameTitle(initialTitle, renameOptions);
+              await session.renameTitle(effectiveTitle, renameOptions);
             } catch (error) {
               if (error?.code === WORKSPACE_SESSION_STALE || renameOptions?.signal?.aborted) {
                 throw error;
@@ -183,6 +189,17 @@ export async function askInWorkspaceSession({
           // cleared the mapping and must not receive this prompt.
           if (conversationGenerationMoved(harness, key, conversationGeneration)) {
             throw workspaceSessionStaleError();
+          }
+          // Record the newly bound Session in the conversation's navigation ring
+          // so /ls, /go, /prev and /next can find it later. Optional: a state
+          // store without ring support simply skips this.
+          try {
+            const registered = await state.ensureSessionRing?.(key, sessionId, {
+              title: typeof effectiveTitle === 'string' && effectiveTitle ? effectiveTitle : undefined,
+            });
+            if (registered?.entry) await state.appendRing?.(key, registered.entry.n);
+          } catch (error) {
+            console.warn('[dsh-im] unable to record the session in the navigation ring:', error?.message ?? error);
           }
           return { sessionId, session, recovered: replacingUnreadable };
         }
@@ -232,12 +249,24 @@ export async function askInWorkspaceSession({
         throw error;
       }
       return {
-        sessionId: binding.sessionId,
+        sessionId: binding.session.replySessionId ?? binding.sessionId,
         answer,
         ...(artifacts.length > 0 ? { artifacts } : {}),
       };
     } catch (error) {
       const failure = messageDiagnosticError(error, diagnostic);
+      if (dsBotSession && error?.code === 'session-archived'
+        && extractConnectionEvidence(failure).details.submissionState === 'not-submitted') {
+        let freshSessionId = null;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          freshSessionId = await harness.resolveDsBotSession?.(key).catch(() => null);
+          if (freshSessionId && freshSessionId !== diagnostic.sessionId) break;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (freshSessionId && freshSessionId !== diagnostic.sessionId) {
+          continue;
+        }
+      }
       // Retry once, only with positive evidence that no prompt was submitted.
       // The binding lock rechecks identity so a concurrent /new or workspace
       // switch cannot be overwritten by recovery of the previous Session.
