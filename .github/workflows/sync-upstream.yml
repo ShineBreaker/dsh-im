@@ -20,11 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+          # 设置了 UPSTREAM_SYNC_TOKEN 时用它检出，后续 git push 才能改 .github/workflows/。
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Configure upstream
+        id: upstream
         run: |
           git remote add upstream https://github.com/xmanrui/dsh-im.git 2>/dev/null \
             || git remote set-url upstream https://github.com/xmanrui/dsh-im.git
@@ -57,6 +61,7 @@ jobs:
           echo 'changed=true' >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
+        id: setup_node
         if: steps.merge.outputs.changed == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -64,16 +69,19 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        id: install
         if: steps.merge.outputs.changed == 'true'
         run: npm ci
 
       - name: Verify merged tree
+        id: check
         if: steps.merge.outputs.changed == 'true'
         run: npm run check
 
       # npm run check 内含 build；打包产物必须随合并一起提交，否则推送出去的
       # lib/ 仍是合并现场而不是重新生成的结果。
       - name: Commit rebuilt bundles
+        id: bundles
         if: steps.merge.outputs.changed == 'true'
         run: |
           if ! git diff --quiet -- lib; then
@@ -82,29 +90,148 @@ jobs:
           fi
 
       - name: Push merged main
+        id: push
         if: steps.merge.outputs.changed == 'true'
         run: git push origin HEAD:main
 
+      # 任何失败都要留下 issue。label 不存在就先建；已有未关闭的同 label
+      # issue 就评论而不是再开一张。创建和评论都失败时必须非零退出
+      # （不能只打 ::error:: 然后让步骤变绿）。
       - name: Report failure
         if: failure()
-        run: |
-          # bash -e 下每条 gh 失败都会中断；这里显式兜底，保证任何一条路都
-          # 留下痕迹：优先带 label，退回无 label，再退回 ::error:: 日志。
-          body="$(printf '%s\n' \
-            '每日同步 upstream/main 的自动合并没有通过，main 未被修改。' \
-            '' \
-            "- 运行记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            '' \
-            '常见原因：非构建产物冲突，或合入后 `npm run check` 失败。' \
-            '处理方式：本地 `git fetch upstream && git merge upstream/main`，解决后跑 `npm run check` 再推送。')"
-          if gh issue create --title "上游同步失败 $(date -u +%F)" --body "$body" --label 'upstream-sync'; then
-            exit 0
-          fi
-          echo '::warning::带 label 的 issue 创建失败，退回无 label 重试'
-          if gh issue create --title "上游同步失败 $(date -u +%F)" --body "$body"; then
-            exit 0
-          fi
-          echo '::error::issue 创建失败（仓库可能禁用了 Issues），失败详情如下：'
-          echo "::error::$body"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          STEP_CHECKOUT: ${{ steps.checkout.outcome }}
+          STEP_UPSTREAM: ${{ steps.upstream.outcome }}
+          STEP_MERGE: ${{ steps.merge.outcome }}
+          STEP_SETUP_NODE: ${{ steps.setup_node.outcome }}
+          STEP_INSTALL: ${{ steps.install.outcome }}
+          STEP_CHECK: ${{ steps.check.outcome }}
+          STEP_BUNDLES: ${{ steps.bundles.outcome }}
+          STEP_PUSH: ${{ steps.push.outcome }}
+        run: |
+          set -euo pipefail
+
+          gh label create upstream-sync \
+            --repo "$GITHUB_REPOSITORY" \
+            --color B60205 \
+            --description '上游同步（upstream/main）自动合并失败' \
+            --force || true
+
+          conflicts=""
+          upstream_sha="unknown"
+          workflow_diff=""
+          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            conflicts="$(git diff --name-only --diff-filter=U 2>/dev/null || true)"
+            upstream_sha="$(git rev-parse --short upstream/main 2>/dev/null || echo unknown)"
+            if git rev-parse --verify origin/main >/dev/null 2>&1 && git rev-parse --verify HEAD >/dev/null 2>&1; then
+              workflow_diff="$(git diff --name-only origin/main...HEAD -- .github/workflows 2>/dev/null || true)"
+            fi
+          fi
+
+          unmerged_workflows=""
+          if [ -n "$conflicts" ]; then
+            unmerged_workflows="$(printf '%s\n' "$conflicts" | grep '^\.github/workflows/' || true)"
+          fi
+
+          reason="同步任务失败"
+          if [ "${STEP_CHECKOUT:-}" = failure ]; then
+            reason="检出仓库失败"
+          elif [ "${STEP_UPSTREAM:-}" = failure ]; then
+            reason="拉取上游 xmanrui/dsh-im main 失败"
+          elif [ -n "$conflicts" ]; then
+            reason="合并冲突：非 lib/ 文件需要人工解决（lib/ 构建产物按上游版本自动处理）"
+          elif [ "${STEP_MERGE:-}" = failure ]; then
+            reason="合并 upstream/main 失败"
+          elif [ "${STEP_SETUP_NODE:-}" = failure ]; then
+            reason="安装 Node.js 失败"
+          elif [ "${STEP_INSTALL:-}" = failure ]; then
+            reason="npm ci 失败"
+          elif [ "${STEP_CHECK:-}" = failure ]; then
+            reason="npm run check 失败"
+          elif [ "${STEP_BUNDLES:-}" = failure ]; then
+            reason="提交重新构建的 lib/ 失败"
+          elif [ "${STEP_PUSH:-}" = failure ]; then
+            reason="推送到 origin/main 失败"
+          fi
+
+          if [ -n "$conflicts" ]; then
+            conflict_block="$(printf '%s\n' "$conflicts" | sed 's/^/- /')"
+          else
+            conflict_block="- （没有未合并文件，请看运行日志里失败的步骤）"
+          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          pat_hint="$(printf '%s\n' \
+            '若推送被拒绝，且变更包含 `.github/workflows/`：默认的 `GITHUB_TOKEN` 没有 `workflows` 权限，GitHub 会拒绝修改 workflow 文件。请在仓库 Settings → Secrets and variables → Actions 添加 secret `UPSTREAM_SYNC_TOKEN`（PAT，需要 `repo` 与 `workflow` 权限）。配置后，本工作流会优先用它检出、推送，并用它创建或评论 issue。')"
+          if [ -n "$unmerged_workflows" ] || [ -n "$workflow_diff" ] || [ "${STEP_PUSH:-}" = failure ]; then
+            pat_hint="$(printf '%s\n\n%s\n' '这次失败可能就是 workflow 文件推送权限不足。' "$pat_hint")"
+          fi
+
+          title="上游同步失败 $(date -u +%F)"
+          body="$(printf '%s\n' \
+            '每日同步上游没有完成，fork 的 `main` 没有被这次运行更新。' \
+            '' \
+            "- 失败原因：${reason}" \
+            "- 运行记录：${run_url}" \
+            '- 上游仓库：https://github.com/xmanrui/dsh-im' \
+            "- 上游分支：\`main\`（${upstream_sha}）" \
+            '' \
+            '冲突文件：' \
+            '' \
+            "${conflict_block}" \
+            '' \
+            '本地修复：' \
+            '' \
+            '```sh' \
+            'git remote add upstream https://github.com/xmanrui/dsh-im.git 2>/dev/null || git remote set-url upstream https://github.com/xmanrui/dsh-im.git' \
+            'git fetch upstream main' \
+            'git merge upstream/main' \
+            '# 非 lib/ 冲突需要人工解决。lib/ 是构建产物，冲突可执行 git checkout --theirs -- lib 后重新构建。' \
+            'npm ci' \
+            'npm run check' \
+            'git push origin main' \
+            '```' \
+            '' \
+            "${pat_hint}")"
+          comment="$(printf '%s\n' \
+            '又一次同步失败，沿用这张未关闭的 issue，不重复开新的。' \
+            '' \
+            "- 失败原因：${reason}" \
+            "- 运行记录：${run_url}" \
+            '- 上游：https://github.com/xmanrui/dsh-im 分支 `main`（'"${upstream_sha}"'）' \
+            '' \
+            '冲突文件：' \
+            '' \
+            "${conflict_block}" \
+            '' \
+            "${pat_hint}")"
+
+          existing=""
+          list_err="${RUNNER_TEMP:-/tmp}/upstream-sync-issue-list.err"
+          if ! existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --label upstream-sync --state open --limit 20 --json number --jq '.[-1].number' 2>"$list_err")"; then
+            echo '::warning::按 upstream-sync 查询已有 issue 失败，改为尝试新建'
+            cat "$list_err" || true
+            existing=""
+          fi
+
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            echo "已有未关闭的 upstream-sync issue #${existing}，改为评论。"
+            if gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$comment"; then
+              exit 0
+            fi
+            echo "::error::评论 issue #${existing} 失败"
+            exit 1
+          fi
+
+          if gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label upstream-sync; then
+            exit 0
+          fi
+
+          echo '::warning::带 label 的 issue 创建失败，退回无 label 重试'
+          if gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"; then
+            exit 0
+          fi
+
+          echo '::error::无法创建或评论 issue。若日志是 Resource not accessible by integration (createIssue)，多半是仓库没开 Issues（fork 默认关闭）；请在 Settings → General → Features 打开 Issues。也可配置 secret UPSTREAM_SYNC_TOKEN。'
+          exit 1
