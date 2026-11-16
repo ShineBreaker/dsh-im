@@ -14,7 +14,6 @@ import { apply as applyIMessage } from './channels/imessage/index.mjs';
 import { apply as applyEmail } from './channels/email/index.mjs';
 import { apply as applyMatrix } from './channels/matrix/index.mjs';
 import { installOutboundArtifactTool } from '../../src/channels/shared/semantic/artifact.mjs';
-import { installRenderTextTool } from '../../src/channels/shared/render-tool.mjs';
 import { installHostLanguage } from './host-language.mjs';
 import { installHostLanguageRpc } from './host-language-rpc.mjs';
 import { installDeliveryRpc } from './delivery-rpc.mjs';
@@ -32,6 +31,7 @@ import { getDeliverySyncSettingsStore } from '../../src/channels/shared/delivery
 import { installSessionTitlePrefix } from './session-title-prefix.mjs';
 import { installUpdateRpc } from './update-rpc.mjs';
 import { installPushMediaTool } from './push-media-tool.mjs';
+import { installSendReportTool } from './send-report-tool.mjs';
 import { installChannelListRpc } from './channel-list-rpc.mjs';
 
 export const name = 'dsh-im-host';
@@ -204,13 +204,13 @@ export function createImHostPlugin(internals = {}) {
         installOutboundArtifactTool(artifactCtx);
         installGroupHistoryTools(artifactCtx);
         installPushMediaTool(artifactCtx, deliveryService);
-        installRenderTextTool(artifactCtx);
+        installSendReportTool(artifactCtx, deliveryService);
       });
     } else {
       installOutboundArtifactTool(ctx);
       installGroupHistoryTools(ctx);
       installPushMediaTool(ctx, deliveryService);
-      installRenderTextTool(ctx);
+      installSendReportTool(ctx, deliveryService);
     }
     const logger = typeof ctx?.logger === 'function'
       ? ctx.logger(name)
